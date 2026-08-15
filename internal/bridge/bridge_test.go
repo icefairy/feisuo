@@ -66,7 +66,7 @@ func TestParseContentTrimmed(t *testing.T) {
 }
 
 func TestMaxDepth(t *testing.T) {
-	if MaxDepth != 3 {
-		t.Errorf("MaxDepth = %d, want 3", MaxDepth)
+	if MaxDepth != 5 {
+		t.Errorf("MaxDepth = %d, want 5", MaxDepth)
 	}
 }

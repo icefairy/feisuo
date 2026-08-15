@@ -10,7 +10,7 @@ import (
 )
 
 // MaxDepth 最大转发深度（防环：A→B→A→B... 死循环）
-const MaxDepth = 3
+const MaxDepth = 5
 
 var (
 	// bridgeRe 匹配 <bridge to="会话名">任意内容</bridge>，不贪婪
