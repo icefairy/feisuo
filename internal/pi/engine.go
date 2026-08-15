@@ -110,6 +110,18 @@ func (e *Engine) Close() {
 	e.clients = map[string]*rpcClient{}
 }
 
+// Kill 关闭指定会话的常驻 pi 进程（真正释放资源）。
+// 会话不存在或未启动时静默返回。之后该会话再次收到消息会自动重启进程。
+func (e *Engine) Kill(session string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c, ok := e.clients[session]; ok && c != nil {
+		log.Printf("[pi/%s] killing rpc process", session)
+		c.close()
+		delete(e.clients, session)
+	}
+}
+
 // SessionCount 返回活跃常驻进程数（调试用）。
 func (e *Engine) SessionCount() int {
 	e.mu.Lock()

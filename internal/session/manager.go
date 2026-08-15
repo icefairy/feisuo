@@ -58,6 +58,13 @@ func (m *Manager) Create(name string) {
 	m.sessions[name] = NewSession(name)
 }
 
+// Queue 返回当前队列（Kill 后为 nil，表示会话已停止）
+func (s *Session) QueueChan() chan Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Queue
+}
+
 func (m *Manager) Exists(name string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -133,8 +140,36 @@ func (m *Manager) Kill(name string) {
 	s.StoppedAt = &now
 	s.mu.Unlock()
 
-	// drain queue
-	close(s.Queue)
+	// 队列关闭后置 nil（nil channel 的 send 走 select default 返回 false，安全）
+	s.mu.Lock()
+	q := s.Queue
+	s.Queue = nil
+	s.mu.Unlock()
+	if q != nil {
+		close(q)
+	}
+}
+
+// Reopen 复活一个已停止的会话：重建队列、重置状态。
+// 用于 /KILL 之后再次给该会话发消息（自动重启 pi 进程 + 消费循环）。
+func (m *Manager) Reopen(name string) bool {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != "stopped" {
+		return false
+	}
+	s.Status = "idle"
+	s.Err = ""
+	s.Message = ""
+	s.StoppedAt = nil
+	s.Queue = make(chan Message, 10)
+	return true
 }
 
 func (m *Manager) Rename(oldName, newName string) bool {

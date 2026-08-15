@@ -11,6 +11,7 @@ import (
 
 	"feisuo/internal/config"
 	"feisuo/internal/feishu"
+	"feisuo/internal/intent"
 	"feisuo/internal/pi"
 	"feisuo/internal/protocol"
 	"feisuo/internal/session"
@@ -53,6 +54,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 意图路由（普通消息自动解析发往哪个会话；/ 开头命令不受影响）
+	var router *intent.Router
+	if cfg.Intent.Enabled {
+		router = intent.New(cfg.Intent.Enabled, cfg.Intent.Model, cfg.Intent.BaseURL, cfg.Intent.APIKey, cfg.Intent.Timeout)
+		log.Printf("意图路由已启用: model=%s", cfg.Intent.Model)
+	} else {
+		log.Printf("意图路由未启用（普通消息直接发默认会话）")
+	}
+
 	// 用 started 记录已启动的会话循环
 	started := make(map[string]bool)
 
@@ -68,7 +78,7 @@ func main() {
 	startLoop(cfg.Sessions.DefaultName)
 
 	err = fc.Start(ctx, func(ev feishu.Event) {
-		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop)
+		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, router, cfg.Sessions.DefaultName)
 	})
 	if err != nil {
 		log.Fatalf("feishu: %v", err)
@@ -80,7 +90,7 @@ func main() {
 	fmt.Printf("  命令: /TO <会话> <消息> | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 
-	go handleLocalInput(ctx, parser, sm, piEng, fc, s, startLoop)
+	go handleLocalInput(ctx, parser, sm, piEng, fc, s, startLoop, cfg.Sessions.DefaultName)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -100,10 +110,16 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 			if !ok {
 				return
 			}
+			// 会话已停止（Kill 后队列为 nil）：退场，等待 Reopen 后由外部重启循环
+			queue := se.QueueChan()
+			if queue == nil {
+				log.Printf("[session/%s] stopped, loop exiting", name)
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case msg, ok := <-se.Queue:
+			case msg, ok := <-queue:
 				if !ok {
 					return
 				}
@@ -112,13 +128,13 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 				st.Save(se)
 				log.Printf("[session/%s] processing: %s", name, msg.Content)
 
-				// 通知飞书
-				fc.SendChunk(msg.Sender, name, "开始处理...")
+				// 通知飞书（流式编辑模式：一条消息内滚动更新）
+				fc.StreamBegin(msg.Sender, name)
 
 				piEng.Execute(ctx, name, msg.Content,
 					func(chunk string) {
 						sm.SetMessage(name, chunk)
-						fc.SendChunk(msg.Sender, name, chunk)
+						fc.StreamChunk(msg.Sender, name, chunk)
 						st.Save(se)
 					},
 					func(final string, err error) {
@@ -126,11 +142,11 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							sm.SetStatus(name, "error")
 							se.Err = err.Error()
 							sm.SetMessage(name, err.Error())
-							fc.SendChunk(msg.Sender, name, "❌ 失败: "+err.Error())
+							fc.StreamEnd(msg.Sender, name, "失败: "+err.Error(), false)
 						} else {
 							sm.SetStatus(name, "done")
 							sm.SetMessage(name, final)
-							fc.SendChunk(msg.Sender, name, "✅ 完成")
+							fc.StreamEnd(msg.Sender, name, final, true)
 						}
 						st.Save(se)
 						time.Sleep(2 * time.Second)
@@ -142,7 +158,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 }
 
 func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
-	parser *protocol.Parser, sm *session.Manager, piEng *pi.Engine, st *store.Store, startLoop func(string)) {
+	parser *protocol.Parser, sm *session.Manager, piEng *pi.Engine, st *store.Store, startLoop func(string), router *intent.Router, defaultName string) {
 
 	msg := ev.Message
 	sender := ev.SenderID
@@ -150,31 +166,74 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 	cmd := parser.Parse(msg.Content)
 
 	if cmd.Type == protocol.CmdCommand {
-		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop)
+		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop, piEng, defaultName)
 		return
 	}
 
-	target := cmd.Session
-	if target == "" {
-		target = "main"
-	}
-
-	if target != "main" && !sm.Exists(target) {
-		sm.Create(target)
-		if se, ok := sm.Get(target); ok {
-			st.Save(se)
+	// 非命令消息：先尝试意图路由（自动解析发往哪个会话 + 会话管理指令）
+	if router != nil && router.Enabled() {
+		route := router.Resolve(sm.List(), defaultName, msg.Content)
+		switch route.Action {
+		case intent.ActionList:
+			fc.Reply(sender, "📋 当前会话:\n"+sm.FormatStatus())
+			return
+		case intent.ActionNew:
+			name := route.Target
+			if sm.Exists(name) {
+				fc.Reply(sender, fmt.Sprintf("⚠️ 会话 `%s` 已存在，用 /LIST 查看", name))
+				return
+			}
+			sm.Create(name)
+			startLoop(name)
+			if se, ok := sm.Get(name); ok {
+				st.Save(se)
+			}
+			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+			return
+		case intent.ActionKill:
+			name := route.Target
+			if !sm.Exists(name) {
+				fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
+				return
+			}
+			if name == defaultName {
+				fc.Reply(sender, "❌ 不能关闭默认会话 `main`")
+				return
+			}
+			piEng.Kill(name)
+			sm.Kill(name)
+			fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
+			return
 		}
-		startLoop(target)
+
+		// send：目标会话可能已停止（Kill 过），自动复活
+		target, content := route.Target, route.Content
+		if target != defaultName && !sm.Exists(target) {
+			log.Printf("[intent] target %q not exists, fallback to %q", target, defaultName)
+			fc.Reply(sender, fmt.Sprintf("🤖 你想发给会话 `%s`，但它不存在。可 /NEW %s 创建，或 /TO %s <消息> 精确发送。已回退到默认会话。", target, target, target))
+			target = defaultName
+			content = msg.Content
+		}
+		// stopped 会话自动复活（重建队列 + 重启循环）
+		if sm.Exists(target) && sm.Reopen(target) {
+			startLoop(target)
+			log.Printf("[intent] session %q reopened", target)
+		}
+		sm.Enqueue(target, session.Message{Content: content, Sender: sender})
+		return
 	}
 
-	sm.Enqueue(target, session.Message{
-		Content: msg.Content,
-		Sender:  sender,
-	})
+	target := "main"
+	// stopped 会话自动复活（重建队列 + 重启循环）
+	if sm.Exists(target) && sm.Reopen(target) {
+		startLoop(target)
+		log.Printf("[intent] session %q reopened", target)
+	}
+	sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender})
 }
 
 func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
-	sm *session.Manager, sender string, st *store.Store, startLoop func(string)) {
+	sm *session.Manager, sender string, st *store.Store, startLoop func(string), piEng *pi.Engine, defaultName string) {
 
 	switch cmd.Cmd {
 	case "new":
@@ -194,17 +253,23 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		fc.Reply(sender, sm.FormatStatus())
 
 	case "to":
-		parts := protocol.SplitTwo(cmd.Arg)
-		if parts[0] == "" {
+		// parser 已拆分好：cmd.Session=会话名, cmd.Arg=消息（不要重复 SplitTwo！）
+		name := cmd.Session
+		if name == "" {
 			fc.Reply(sender, "❌ /TO <会话> <消息> — 请指定会话名和消息")
 			return
 		}
-		if !sm.Exists(parts[0]) {
-			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，先 /NEW %s", parts[0], parts[0]))
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，先 /NEW %s", name, name))
 			return
 		}
-		sm.Enqueue(parts[0], session.Message{
-			Content: parts[1],
+		// stopped 会话自动复活
+		if sm.Reopen(name) {
+			startLoop(name)
+			log.Printf("[session/%s] reopened via /TO", name)
+		}
+		sm.Enqueue(name, session.Message{
+			Content: cmd.Arg,
 			Sender:  sender,
 		})
 
@@ -214,8 +279,17 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			fc.Reply(sender, "❌ /KILL <会话> — 请指定会话名")
 			return
 		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
+			return
+		}
+		if name == defaultName {
+			fc.Reply(sender, "❌ 不能关闭默认会话 `main`")
+			return
+		}
+		piEng.Kill(name)
 		sm.Kill(name)
-		fc.Reply(sender, fmt.Sprintf("🗑 已终止会话: `%s`", name))
+		fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
 
 	case "name", "rename":
 		parts := protocol.SplitTwo(cmd.Arg)
@@ -242,7 +316,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 }
 
 func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.Manager,
-	piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string)) {
+	piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), defaultName string) {
 
 	for {
 		select {
@@ -259,7 +333,7 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 			}
 			cmd := parser.Parse(line)
 			if cmd.Type == protocol.CmdCommand {
-				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop)
+				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, piEng, defaultName)
 			} else {
 				sm.Enqueue("main", session.Message{Content: line, Sender: "local"})
 			}
