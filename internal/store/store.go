@@ -29,6 +29,7 @@ func (s *Store) Save(se *session.Session) {
 		"name":       se.Name,
 		"status":     se.Status,
 		"message":    se.Message,
+		"system_prompt": se.SystemPrompt,
 		"started_at": se.StartedAt.Format("2006-01-02 15:04:05"),
 		"stopped_at": se.StoppedAt,
 		"error":      se.Err,
@@ -48,6 +49,7 @@ type Record struct {
 	Name      string  `json:"name"`
 	Status    string  `json:"status"`
 	Message   string  `json:"message"`
+	SystemPrompt string `json:"system_prompt"`
 	StartedAt string  `json:"started_at"`
 	StoppedAt *string `json:"stopped_at"`
 	Error     string  `json:"error"`

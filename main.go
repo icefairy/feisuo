@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"feisuo/internal/auth"
 	"feisuo/internal/bridge"
 	"feisuo/internal/config"
 	"feisuo/internal/feishu"
@@ -20,7 +21,70 @@ import (
 	"time"
 )
 
+// runAuthCmd 处理认证子命令：approve <ID> / revoke <ID> / list-auth / list_pending
+// 需要读取配置获取 data_dir（authorized.json 存于此目录）。
+func runAuthCmd(cmd string, args []string) {
+	cfg, err := config.Load(findConfig())
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	as, err := auth.Open(cfg.Sessions.DataDir)
+	if err != nil {
+		log.Fatalf("auth: %v", err)
+	}
+
+	switch cmd {
+	case "approve":
+		if len(args) < 1 || args[0] == "" {
+			fmt.Println("用法: feisuo approve <用户ID>")
+			os.Exit(1)
+		}
+		id := args[0]
+		added, removed := as.Approve(id)
+		authList, _ := as.List()
+		fmt.Printf("✅ 已授权: %s (新增=%v, 从待授权移除=%v)\n", id, added, removed)
+		fmt.Printf("当前已授权 %d 人\n", len(authList))
+	case "revoke":
+		if len(args) < 1 || args[0] == "" {
+			fmt.Println("用法: feisuo revoke <用户ID>")
+			os.Exit(1)
+		}
+		id := args[0]
+		if as.Revoke(id) {
+			fmt.Printf("🗑 已撤销授权: %s\n", id)
+		} else {
+			fmt.Printf("⚠️ 用户 %s 不在授权列表\n", id)
+			os.Exit(1)
+		}
+	case "list-auth", "list_pending":
+		authList, pending := as.List()
+		fmt.Println("📋 已授权用户:")
+		if len(authList) == 0 {
+			fmt.Println("  （无）")
+		}
+		for _, id := range authList {
+			fmt.Printf("  ✅ %s\n", id)
+		}
+		fmt.Println("\n⏳ 待授权申请:")
+		if len(pending) == 0 {
+			fmt.Println("  （无）")
+		}
+		for _, id := range pending {
+			fmt.Printf("  🆕 %s\n", id)
+		}
+	}
+}
+
 func main() {
+	// 子命令模式：feisuo approve <ID> / revoke <ID> / list-auth
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "approve", "revoke", "list-auth", "list_pending":
+			runAuthCmd(os.Args[1], os.Args[2:])
+			return
+		}
+	}
+
 	cfg, err := config.Load(findConfig())
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -31,6 +95,14 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 	defer s.Close()
+
+	// 授权管理（authorized.json 存于同一数据目录，命令行 approve/revoke 即时生效）
+	authStore, err := auth.Open(cfg.Sessions.DataDir)
+	if err != nil {
+		log.Fatalf("auth: %v", err)
+	}
+	authList, pending := authStore.List()
+	log.Printf("[auth] authorized users: %d, pending: %d", len(authList), len(pending))
 
 	sm := session.New()
 
@@ -44,6 +116,8 @@ func main() {
 	})
 	// 注入会话列表提供者：pi 启动时生成 bridge 协作协议（可转发给哪些会话）
 	piEng.SessionList = func() []string { return sm.List() }
+	// 注入会话角色提供者：pi 启动时注入自定义系统提示词
+	piEng.SystemPromptOf = func(name string) string { return sm.Role(name) }
 	defer piEng.Close()
 
 	fc := feishu.New(feishu.Config{
@@ -92,6 +166,9 @@ func main() {
 			continue
 		}
 		sm.Create(name)
+		if rec.SystemPrompt != "" {
+			sm.SetRole(name, rec.SystemPrompt)
+		}
 		startLoop(name)
 		restored++
 		log.Printf("[restore] session %q restored (status=%s)", name, rec.Status)
@@ -101,6 +178,13 @@ func main() {
 	}
 
 	err = fc.Start(ctx, func(ev feishu.Event) {
+		// 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
+		if ev.SenderID != "" && !authStore.IsAuthorized(ev.SenderID) {
+			first := authStore.RecordRequest(ev.SenderID)
+			log.Printf("[auth] unauthorized sender %q (first=%v) blocked: %q", ev.SenderID, first, ev.Message.Content)
+			fc.Reply(ev.SenderID, fmt.Sprintf("🔒 你还没有授权使用飞梭。\n你的用户 ID: `%s`\n请管理员执行: `feisuo approve %s`\n授权后即可使用。", ev.SenderID, ev.SenderID))
+			return
+		}
 		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, router, cfg.Sessions.DefaultName)
 	})
 	if err != nil {
@@ -239,11 +323,18 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 				return
 			}
 			sm.Create(name)
+			if route.Role != "" {
+				sm.SetRole(name, route.Role)
+			}
 			startLoop(name)
 			if se, ok := sm.Get(name); ok {
 				st.Save(se)
 			}
-			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+			if route.Role != "" {
+				fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`，角色: %s", name, route.Role))
+			} else {
+				fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+			}
 			return
 		case intent.ActionKill:
 			name := route.Target
@@ -297,15 +388,51 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 	case "new":
 		name := cmd.Arg
 		if name == "" {
-			fc.Reply(sender, "❌ /NEW <name> — 请指定会话名称")
+			fc.Reply(sender, "❌ /NEW <name> [--role \"描述\"] — 请指定会话名称")
 			return
 		}
 		sm.Create(name)
+		if cmd.Role != "" {
+			sm.SetRole(name, cmd.Role)
+		}
 		startLoop(name)
 		if se, ok := sm.Get(name); ok {
 			st.Save(se)
 		}
-		fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+		if cmd.Role != "" {
+			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`，角色: %s", name, cmd.Role))
+		} else {
+			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+		}
+
+	case "role":
+		// /ROLE <会话> [--role "描述"]  → 设置/查看会话角色
+		name := cmd.Arg
+		if name == "" {
+			fc.Reply(sender, "❌ /ROLE <会话> [--role \"描述\"] — 设置或查看会话角色")
+			return
+		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，先 /NEW %s", name, name))
+			return
+		}
+		if cmd.Role != "" {
+			sm.SetRole(name, cmd.Role)
+			// 角色变更需要重启 pi 进程才能生效（下次消息自动拉起新进程）
+			piEng.Kill(name)
+			if se, ok := sm.Get(name); ok {
+				st.Save(se)
+			}
+			fc.Reply(sender, fmt.Sprintf("🎭 已更新会话 `%s` 角色，下次消息生效", name))
+		} else {
+			role := sm.Role(name)
+			if role == "" {
+				fc.Reply(sender, fmt.Sprintf("🎭 会话 `%s` 无自定义角色（默认助手）", name))
+			} else {
+				fc.Reply(sender, fmt.Sprintf("🎭 会话 `%s` 角色: %s", name, role))
+			}
+		}
+		return
 
 	case "list", "ls", "status":
 		fc.Reply(sender, sm.FormatStatus())
@@ -364,7 +491,8 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 	case "help":
 		fc.Reply(sender, `🤖 飞梭命令:
   /TO <会话> <消息>    发给指定会话
-  /NEW <名称>         创建新会话
+  /NEW <名称> [--role "描述"]  创建新会话（可带角色）
+  /ROLE <会话> [--role "描述"] 设置/查看会话角色
   /LIST               列出所有会话
   /STATUS             查看会话状态
   /KILL <会话>        终止会话

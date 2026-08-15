@@ -25,9 +25,10 @@ const (
 
 // Route 意图路由结果
 type Route struct {
-	Action  Action // 意图动作
-	Target  string // 目标会话名（send/new/kill 用）
-	Content string // 消息内容（send 用；new/kill 可为空）
+	Action  Action // send | list | new | kill
+	Target  string // 目标会话名（空 = 默认会话）
+	Content string // 清洗后的消息（空 = 原文）
+	Role    string // new 时会话角色（可空）
 }
 
 // Router 用小模型解析用户意图，把消息路由到对应会话
@@ -159,6 +160,7 @@ func buildPrompt(sessions []string, defaultName, userText string) string {
 	b.WriteString("- \"list\"：用户想查看/获取会话列表（如\"有哪些会话\"\"看看我的会话\"\"列出会话\"）；\n")
 	b.WriteString("- \"new\"：用户想新建会话，target 为新会话名（如\"新建一个叫work的会话\"）；\n")
 	b.WriteString("- \"kill\"：用户想关闭/删除某个会话，target 为会话名（如\"把ice关了吧\"\"删除work会话\"）。\n")
+	b.WriteString("role 字段：新建会话时，若用户描述了会话的角色/职责/人设（如\"翻译助手\"\"负责股票分析\"），提取为 role 字符串；无描述则为空字符串。\n")
 	b.WriteString("路由规则：\n")
 	b.WriteString("1. **默认目标永远是 \"main\"**——绝大多数消息就是发给 main 的普通对话（action=send）；\n")
 	b.WriteString("2. 只有消息里**明确提到**某个其他会话名（如\"发给ice\"\"ice帮我看看\"\"跟ice说\"\"work: xxx\"），目标才是那个会话；\n")
@@ -170,7 +172,8 @@ func buildPrompt(sessions []string, defaultName, userText string) string {
 	b.WriteString("用户: ice 帮我看看这个代码\n输出: {\"action\":\"send\",\"target\":\"ice\",\"content\":\"帮我看看这个代码\"}\n")
 	b.WriteString("用户: 跟ice说 今天辛苦了\n输出: {\"action\":\"send\",\"target\":\"ice\",\"content\":\"今天辛苦了\"}\n")
 	b.WriteString("用户: 有哪些会话啊\n输出: {\"action\":\"list\",\"target\":\"main\",\"content\":\"\"}\n")
-	b.WriteString("用户: 新建一个会话叫 test\n输出: {\"action\":\"new\",\"target\":\"test\",\"content\":\"\"}\n")
+	b.WriteString("用户: 新建一个会话叫 test\n输出: {\"action\":\"new\",\"target\":\"test\",\"content\":\"\",\"role\":\"\"}\n")
+	b.WriteString("用户: 新建一个翻译助手会话叫 fanyi，负责中英翻译\n输出: {\"action\":\"new\",\"target\":\"fanyi\",\"content\":\"\",\"role\":\"负责中英翻译的翻译助手\"}\n")
 	b.WriteString("用户: 把 ice 会话关掉\n输出: {\"action\":\"kill\",\"target\":\"ice\",\"content\":\"\"}\n")
 	b.WriteString("用户: 你好啊\n输出: {\"action\":\"send\",\"target\":\"main\",\"content\":\"你好啊\"}\n\n")
 	b.WriteString("现在解析：\n用户: ")
@@ -243,6 +246,7 @@ func parseJSON(s string) Route {
 		Action  string `json:"action"`
 		Target  string `json:"target"`
 		Content string `json:"content"`
+		Role    string `json:"role"`
 	}
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return Route{}
@@ -257,5 +261,6 @@ func parseJSON(s string) Route {
 		Action:  action,
 		Target:  strings.TrimSpace(v.Target),
 		Content: strings.TrimSpace(v.Content),
+		Role:    strings.TrimSpace(v.Role),
 	}
 }

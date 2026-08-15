@@ -38,6 +38,9 @@ type Engine struct {
 	// SessionList 返回当前会话名列表（用于动态生成 bridge 协作协议注入 prompt）。
 	// 由 main 注入；nil 则不注入 bridge 协议。
 	SessionList func() []string
+	// SystemPromptOf 返回指定会话的自定义系统提示词（角色），用于启动 pi 时注入。
+	// 可为 nil（不注入角色）。
+	SystemPromptOf func(session string) string
 
 	mu      sync.Mutex
 	clients map[string]*rpcClient // session name -> 常驻进程
@@ -93,9 +96,16 @@ func (e *Engine) getClient(session string) *rpcClient {
 	}
 	cfg := e.cfg
 	cfg.SessionID = "feisuo-" + sanitizeSessionID(session)
-	if e.SessionList != nil {
-		cfg.AppendSystemPrompt = bridgePrompt(e.SessionList())
+	var prompts []string
+	if e.SystemPromptOf != nil {
+		if role := strings.TrimSpace(e.SystemPromptOf(session)); role != "" {
+			prompts = append(prompts, role)
+		}
 	}
+	if e.SessionList != nil {
+		prompts = append(prompts, bridgePrompt(e.SessionList()))
+	}
+	cfg.AppendSystemPrompt = strings.Join(prompts, "\n\n")
 	c, err := startRPC(context.Background(), cfg)
 	if err != nil {
 		log.Printf("[pi/%s] start rpc failed: %v", session, err)

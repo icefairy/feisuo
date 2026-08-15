@@ -24,6 +24,7 @@ type Session struct {
 	StartedAt  time.Time
 	StoppedAt  *time.Time
 	Err        string
+	SystemPrompt string // 会话角色/系统提示词（可空）
 	mu         sync.Mutex
 }
 
@@ -67,6 +68,33 @@ func (s *Session) QueueChan() chan Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Queue
+}
+
+// SetRole 设置会话系统提示词（角色）。返回是否成功（会话必须存在）。
+func (m *Manager) SetRole(name, role string) bool {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	s.SystemPrompt = role
+	s.mu.Unlock()
+	return true
+}
+
+// Role 返回会话系统提示词（不存在返回空）。
+func (m *Manager) Role(name string) string {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.SystemPrompt
 }
 
 func (m *Manager) Exists(name string) bool {
@@ -210,10 +238,22 @@ func (m *Manager) FormatStatus() string {
 	for _, s := range m.sessions {
 		s.mu.Lock()
 		icon := statusIcon(s.Status)
-		lines = append(lines, fmt.Sprintf("  %s %-12s %s", icon, s.Name, statusDesc(s)))
+		line := fmt.Sprintf("  %s %-12s %s", icon, s.Name, statusDesc(s))
+		if s.SystemPrompt != "" {
+			line += " 🎭" + truncateRole(s.SystemPrompt, 24)
+		}
+		lines = append(lines, line)
 		s.mu.Unlock()
 	}
 	return strings.Join(lines, "\n")
+}
+
+func truncateRole(role string, max int) string {
+	r := []rune(role)
+	if len(r) <= max {
+		return " " + role
+	}
+	return " " + string(r[:max]) + "…"
 }
 
 func statusIcon(status string) string {
