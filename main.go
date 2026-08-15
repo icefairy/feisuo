@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"feisuo/internal/bridge"
 	"feisuo/internal/config"
 	"feisuo/internal/feishu"
 	"feisuo/internal/intent"
@@ -41,6 +42,8 @@ func main() {
 		APIKey:   cfg.Pi.APIKey,
 		Timeout:  cfg.Pi.Timeout,
 	})
+	// 注入会话列表提供者：pi 启动时生成 bridge 协作协议（可转发给哪些会话）
+	piEng.SessionList = func() []string { return sm.List() }
 	defer piEng.Close()
 
 	fc := feishu.New(feishu.Config{
@@ -66,16 +69,36 @@ func main() {
 	// 用 started 记录已启动的会话循环
 	started := make(map[string]bool)
 
-	startLoop := func(name string) {
+	var startLoop func(string)
+	startLoop = func(name string) {
 		if started[name] {
 			return
 		}
 		started[name] = true
-		go startSessionLoop(ctx, name, sm, piEng, fc, s)
+		go startSessionLoop(ctx, name, sm, piEng, fc, s, startLoop)
 	}
 
 	sm.EnsureDefault(cfg.Sessions.DefaultName)
 	startLoop(cfg.Sessions.DefaultName)
+
+	// 恢复持久会话：读取磁盘上已保存的会话（除显式关闭的 stopped 外全部重建）
+	restored := 0
+	for name, rec := range s.Load() {
+		if name == cfg.Sessions.DefaultName {
+			continue // 默认会话已建立
+		}
+		if rec.Status == "stopped" {
+			log.Printf("[restore] skip stopped session %q", name)
+			continue
+		}
+		sm.Create(name)
+		startLoop(name)
+		restored++
+		log.Printf("[restore] session %q restored (status=%s)", name, rec.Status)
+	}
+	if restored > 0 {
+		log.Printf("[restore] %d persistent session(s) restored", restored)
+	}
 
 	err = fc.Start(ctx, func(ev feishu.Event) {
 		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, router, cfg.Sessions.DefaultName)
@@ -100,7 +123,7 @@ func main() {
 }
 
 // startSessionLoop 每个会话的消费循环
-func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piEng *pi.Engine, fc *feishu.Client, st *store.Store) {
+func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string)) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,9 +167,41 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							sm.SetMessage(name, err.Error())
 							fc.StreamEnd(msg.Sender, name, "失败: "+err.Error(), false)
 						} else {
+							// 解析 bridge 协作标记：剔除标记后发送给用户，转发内容给目标会话
+							clean, reqs := bridge.Parse(final)
 							sm.SetStatus(name, "done")
-							sm.SetMessage(name, final)
-							fc.StreamEnd(msg.Sender, name, final, true)
+							sm.SetMessage(name, clean)
+							fc.StreamEnd(msg.Sender, name, clean, true)
+
+							// 转发 bridge 请求（防环：Depth > MaxDepth 丢弃；自转发忽略）
+							for _, req := range reqs {
+								if req.Target == name {
+									log.Printf("[bridge] self-forward %q -> %q ignored", name, req.Target)
+									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 会话 `%s` 不能转发给自己，请直接处理或指定其他会话", name))
+									continue
+								}
+								if msg.Depth+1 > bridge.MaxDepth {
+									log.Printf("[bridge] depth %d > max %d, drop %q -> %q (loop guard)", msg.Depth+1, bridge.MaxDepth, name, req.Target)
+									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 转发链过深（>%d 层），已停止 `%s` 的转发请求", bridge.MaxDepth, req.Target))
+									continue
+								}
+								if !sm.Exists(req.Target) {
+									log.Printf("[bridge] target %q not exists, drop", req.Target)
+									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 会话 `%s` 不存在，无法转发", req.Target))
+									continue
+								}
+								log.Printf("[bridge] %s -> %s: %s", name, req.Target, req.Content)
+								// 目标会话可能已停止：自动复活
+								if sm.Reopen(req.Target) {
+									startLoop(req.Target)
+								}
+								sm.Enqueue(req.Target, session.Message{
+									Content: req.Content,
+									Sender:  msg.Sender,
+									Depth:   msg.Depth + 1,
+									Origin:  name,
+								})
+							}
 						}
 						st.Save(se)
 						time.Sleep(2 * time.Second)
@@ -202,6 +257,9 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 			}
 			piEng.Kill(name)
 			sm.Kill(name)
+			if se, ok := sm.Get(name); ok {
+				st.Save(se) // 持久化 stopped 状态：重启后不恢复
+			}
 			fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
 			return
 		}
@@ -289,6 +347,9 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		}
 		piEng.Kill(name)
 		sm.Kill(name)
+		if se, ok := sm.Get(name); ok {
+			st.Save(se) // 持久化 stopped 状态：重启后不恢复
+		}
 		fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
 
 	case "name", "rename":

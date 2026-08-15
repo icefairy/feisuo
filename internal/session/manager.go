@@ -10,6 +10,10 @@ import (
 type Message struct {
 	Content string
 	Sender  string
+	// Depth 转发深度（0=用户消息，每经过一次 bridge 转发 +1，>MaxBridgeDepth 丢弃防环）
+	Depth int
+	// Origin 转发来源会话名（空=用户直接消息）
+	Origin string
 }
 
 type Session struct {

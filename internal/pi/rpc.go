@@ -42,8 +42,14 @@ func startRPC(ctx context.Context, cfg Config) (*rpcClient, error) {
 		"--provider", cfg.Provider,
 		"--model", cfg.Model,
 	}
+	if cfg.SessionID != "" {
+		args = append(args, "--session-id", cfg.SessionID)
+	}
 	if cfg.APIKey != "" {
 		args = append(args, "--api-key", cfg.APIKey)
+	}
+	if cfg.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", cfg.AppendSystemPrompt)
 	}
 	binary := cfg.Binary
 	if binary == "" {

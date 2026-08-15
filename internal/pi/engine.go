@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +16,11 @@ type Config struct {
 	BaseURL  string
 	APIKey   string
 	Timeout  int
+	// SessionID 指定 pi 会话 id（持久化对话历史，重启后恢复上下文）。
+	// 为空则不传（每次全新会话）。
+	SessionID string
+	// AppendSystemPrompt 追加到 system prompt（会话协作协议等），可空
+	AppendSystemPrompt string
 }
 
 type Message struct {
@@ -28,6 +34,10 @@ type Message struct {
 // agent_settled 事件触发完成通知。会话之间上下文完全隔离。
 type Engine struct {
 	cfg Config
+
+	// SessionList 返回当前会话名列表（用于动态生成 bridge 协作协议注入 prompt）。
+	// 由 main 注入；nil 则不注入 bridge 协议。
+	SessionList func() []string
 
 	mu      sync.Mutex
 	clients map[string]*rpcClient // session name -> 常驻进程
@@ -73,20 +83,63 @@ func (e *Engine) Execute(ctx context.Context, session, prompt string,
 }
 
 // getClient 获取会话的常驻进程，不存在则启动。
+// 每个会话固定使用 session-id "feisuo-<name>"（sanitize 后），
+// 重启飞梭后用相同 id 拉起 pi，自动恢复该会话的对话历史。
 func (e *Engine) getClient(session string) *rpcClient {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if c, ok := e.clients[session]; ok && c != nil {
 		return c
 	}
-	c, err := startRPC(context.Background(), e.cfg)
+	cfg := e.cfg
+	cfg.SessionID = "feisuo-" + sanitizeSessionID(session)
+	if e.SessionList != nil {
+		cfg.AppendSystemPrompt = bridgePrompt(e.SessionList())
+	}
+	c, err := startRPC(context.Background(), cfg)
 	if err != nil {
 		log.Printf("[pi/%s] start rpc failed: %v", session, err)
 		return nil
 	}
 	e.clients[session] = c
-	log.Printf("[pi/%s] rpc process started", session)
+	log.Printf("[pi/%s] rpc process started (session-id=%s)", session, cfg.SessionID)
 	return c
+}
+
+// bridgePrompt 生成注入 pi system prompt 的会话协作协议说明。
+// 与 internal/bridge 的 BridgePrompt 一致，但避免包循环依赖。
+func bridgePrompt(sessions []string) string {
+	var b strings.Builder
+	b.WriteString("\n\n[飞梭会话协作协议]\n")
+	b.WriteString("你可以请其他会话的助手帮你处理任务。方法：在回复中输出标记\n")
+	b.WriteString("<bridge to=\"会话名\">要发给对方的完整消息</bridge>\n")
+	b.WriteString("飞梭会把标记内部的消息转发给目标会话，对方回复会直接发给用户。\n")
+	b.WriteString("可用会话：" + strings.Join(sessions, ", ") + "\n")
+	b.WriteString("规则：\n")
+	b.WriteString("1. to 必须是上面列出的会话名之一；\n")
+	b.WriteString("2. 标记内部消息要完整自包含（对方看不到本会话对话历史）；\n")
+	b.WriteString("3. 一次最多输出 2 个标记；\n")
+	b.WriteString("4. 普通回复不要输出该标记（否则会被误转发）；\n")
+	b.WriteString("5. 若目标会话不存在，标记会被忽略。\n")
+	return b.String()
+}
+
+// sanitizeSessionID 将会话名转成安全的 pi session id（仅 [a-zA-Z0-9-_]）。
+func sanitizeSessionID(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	s := b.String()
+	if s == "" {
+		return "main"
+	}
+	return s
 }
 
 // onProcessError 当会话进程异常时移除引用（下次消息重新启动）。

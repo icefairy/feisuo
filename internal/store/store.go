@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,3 +42,44 @@ func (s *Store) Save(se *session.Session) {
 }
 
 func (s *Store) Close() {}
+
+// Record 一条已持久化的会话元数据
+type Record struct {
+	Name      string  `json:"name"`
+	Status    string  `json:"status"`
+	Message   string  `json:"message"`
+	StartedAt string  `json:"started_at"`
+	StoppedAt *string `json:"stopped_at"`
+	Error     string  `json:"error"`
+	UpdatedAt string  `json:"updated_at"`
+}
+
+// Load 读取目录下所有已持久化的会话记录（用于重启后恢复）。
+// 返回 map[name]Record。
+func (s *Store) Load() map[string]Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := map[string]Record{}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal(data, &rec); err != nil {
+			continue
+		}
+		if rec.Name != "" {
+			out[rec.Name] = rec
+		}
+	}
+	return out
+}
