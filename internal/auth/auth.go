@@ -64,14 +64,44 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	os.MkdirAll(filepath.Dir(s.path), 0755)
-	return os.WriteFile(s.path, b, 0644)
+	dir := filepath.Dir(s.path)
+	os.MkdirAll(dir, 0755)
+	// 原子写：先写临时文件再 rename，避免跨进程读写撕裂
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
 }
 
-// IsAuthorized 判断用户是否已授权
+// reloadLocked 重新从磁盘加载授权文件（跨进程 approve/revoke 后运行中进程立即感知）。
+// 调用方必须已持有 s.mu。文件不存在则视为空。
+func (s *Store) reloadLocked() {
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.data = &data{}
+		}
+		return
+	}
+	var d data
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return // 解析失败（如跨进程写中途）保留现有内存数据
+	}
+	if d.Authorized == nil {
+		d.Authorized = []string{}
+	}
+	if d.Pending == nil {
+		d.Pending = []string{}
+	}
+	s.data = &d
+}
+
+// IsAuthorized 判断用户是否已授权。每次实时读文件，CLI approve 后立即生效。
 func (s *Store) IsAuthorized(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadLocked()
 	return contains(s.data.Authorized, id)
 }
 
@@ -80,6 +110,7 @@ func (s *Store) IsAuthorized(id string) bool {
 func (s *Store) RecordRequest(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadLocked()
 	if contains(s.data.Pending, id) {
 		return false
 	}
@@ -92,6 +123,7 @@ func (s *Store) RecordRequest(id string) bool {
 func (s *Store) Approve(id string) (bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadLocked()
 	added := false
 	if !contains(s.data.Authorized, id) {
 		s.data.Authorized = append(s.data.Authorized, id)
@@ -113,6 +145,7 @@ func (s *Store) Approve(id string) (bool, bool) {
 func (s *Store) Revoke(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadLocked()
 	revoked := false
 	for i, a := range s.data.Authorized {
 		if a == id {
@@ -127,10 +160,11 @@ func (s *Store) Revoke(id string) bool {
 	return revoked
 }
 
-// List 返回授权列表与待授权列表（快照）。
+// List 返回授权列表与待授权列表（快照，实时读文件）。
 func (s *Store) List() (authorized, pending []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reloadLocked()
 	authorized = append([]string{}, s.data.Authorized...)
 	pending = append([]string{}, s.data.Pending...)
 	return
