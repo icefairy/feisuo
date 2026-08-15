@@ -10,9 +10,9 @@ feishu:
 
 pi:
   binary: "pi"
-  provider: "openai"
+  provider: "agentrium"
   model: "deepseek-v4-flash"
-  base_url: "http://172.16.10.211:3000/v1"
+  base_url: "http://192.168.1.10:3001/v1"
   api_key: "your-api-key-here"
   timeout: 300  # 秒
 

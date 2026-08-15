@@ -10,8 +10,9 @@
 
 ## 特性
 
-- **多会话并行**：每个会话独立队列 + 独立 pi 子进程，互不阻塞（`/NEW` 创建，`/TO` 指定会话）
-- **流式回传**：pi 执行过程逐行推送回飞书，实时可见
+- **多会话并行**：每个会话独立队列 + **独立常驻 pi 进程**（会话之间上下文完全隔离）
+- **上下文延续**：同一会话的消息都发给同一个 `pi --mode rpc` 进程，agent 记得之前的对话（进程内记忆）
+- **流式回传**：pi 的文本增量逐块发回飞书，实时可见
 - **本地交互**：终端 `feisuo>` 提示符可直接发任务，命令语法与飞书一致
 - **会话状态**：idle / busy / done / error / stopped 五态，`/STATUS` 一览
 - **持久化**：会话状态 JSON 落盘 `~/.feisuo/sessions/`，重启可查
@@ -42,7 +43,7 @@ feishu:
 
 pi:
   binary: "pi"                  # pi CLI 路径
-  provider: "openai"
+  provider: "agentrium"   # 与 pi auth/models.json 中配置的 provider 名一致
   model: "deepseek-v4-flash"
   base_url: "http://127.0.0.1:3000/v1"   # OpenAI 兼容端点
   api_key: "your-api-key-here"

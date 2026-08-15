@@ -1,12 +1,10 @@
 package pi
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
-	"os/exec"
-	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,16 +22,25 @@ type Message struct {
 	Sender  string
 }
 
-// Engine 封装 pi CLI 调用
+// Engine 封装 pi RPC 常驻进程。
+// 每个会话持有一个常驻 pi 进程：首次收到该会话消息时启动，
+// 之后所有消息通过 stdin 发 JSON 命令，流式事件从 stdout 读，
+// agent_settled 事件触发完成通知。会话之间上下文完全隔离。
 type Engine struct {
 	cfg Config
+
+	mu      sync.Mutex
+	clients map[string]*rpcClient // session name -> 常驻进程
+	seq     int
 }
 
 func New(cfg Config) *Engine {
-	return &Engine{cfg: cfg}
+	return &Engine{cfg: cfg, clients: make(map[string]*rpcClient)}
 }
 
-// Execute 执行 pi 命令，流式返回每一行
+// Execute 向指定会话的常驻 pi 进程发送 prompt。
+// 会话首次使用时自动启动进程；onChunk 收到流式文本 delta，
+// onDone 收到完整回答或错误。
 func (e *Engine) Execute(ctx context.Context, session, prompt string,
 	onChunk func(string), onDone func(string, error)) {
 
@@ -41,78 +48,71 @@ func (e *Engine) Execute(ctx context.Context, session, prompt string,
 	if timeout == 0 {
 		timeout = 300
 	}
-
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	args := []string{
-		"-p", prompt,
-		"--mode", "text",
-		"--no-session",
-		"--provider", e.cfg.Provider,
-		"--model", e.cfg.Model,
-	}
-	if e.cfg.APIKey != "" {
-		args = append(args, "--api-key", e.cfg.APIKey)
-	}
-
-	binary := e.cfg.Binary
-	if binary == "" {
-		binary = "pi"
-	}
-
-	cmd := exec.CommandContext(ctx, binary, args...)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		onDone("", fmt.Errorf("stdout pipe: %w", err))
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		onDone("", fmt.Errorf("stderr pipe: %w", err))
+	c := e.getClient(session)
+	if c == nil {
+		onDone("", fmt.Errorf("start pi rpc for session %q failed", session))
 		return
 	}
 
-	if err := cmd.Start(); err != nil {
-		onDone("", fmt.Errorf("start: %w", err))
-		return
-	}
-	log.Printf("[pi/%s] pid=%d", session, cmd.Process.Pid)
-
-	// stderr goroutine
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line != "" {
-				log.Printf("[pi/%s] stderr: %s", session, line)
-			}
+	e.seq++
+	id := fmt.Sprintf("f%d", e.seq)
+	log.Printf("[pi/%s] prompt id=%s: %s", session, id, prompt)
+	c.prompt(ctx, id, prompt, onChunk, func(final string, err error) {
+		if err != nil {
+			log.Printf("[pi/%s] id=%s error: %v", session, id, err)
+			// 进程挂了？尝试重启（下次消息自动重连）
+			e.onProcessError(session, c)
+		} else {
+			log.Printf("[pi/%s] id=%s done len=%d", session, id, len(final))
 		}
-	}()
+		onDone(final, err)
+	})
+}
 
-	// stdout 流式
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var full strings.Builder
-	for sc.Scan() {
-		line := sc.Text()
-		if onChunk != nil {
-			onChunk(line)
-		}
-		full.WriteString(line)
-		full.WriteString("\n")
+// getClient 获取会话的常驻进程，不存在则启动。
+func (e *Engine) getClient(session string) *rpcClient {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c, ok := e.clients[session]; ok && c != nil {
+		return c
 	}
+	c, err := startRPC(context.Background(), e.cfg)
+	if err != nil {
+		log.Printf("[pi/%s] start rpc failed: %v", session, err)
+		return nil
+	}
+	e.clients[session] = c
+	log.Printf("[pi/%s] rpc process started", session)
+	return c
+}
 
-	if err := cmd.Wait(); err != nil {
-		onDone(strings.TrimSpace(full.String()), fmt.Errorf("wait: %w", err))
-		return
+// onProcessError 当会话进程异常时移除引用（下次消息重新启动）。
+func (e *Engine) onProcessError(session string, c *rpcClient) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.clients[session] == c {
+		delete(e.clients, session)
 	}
+	c.close()
+}
 
-	final := strings.TrimSpace(full.String())
-	if final == "" {
-		final = "（Pi 返回为空）"
+// Close 关闭所有常驻进程。
+func (e *Engine) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for name, c := range e.clients {
+		log.Printf("[pi/%s] closing rpc process", name)
+		c.close()
 	}
-	log.Printf("[pi/%s] done len=%d", session, len(final))
-	onDone(final, nil)
+	e.clients = map[string]*rpcClient{}
+}
+
+// SessionCount 返回活跃常驻进程数（调试用）。
+func (e *Engine) SessionCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.clients)
 }

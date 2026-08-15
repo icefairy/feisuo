@@ -40,6 +40,7 @@ func main() {
 		APIKey:   cfg.Pi.APIKey,
 		Timeout:  cfg.Pi.Timeout,
 	})
+	defer piEng.Close()
 
 	fc := feishu.New(feishu.Config{
 		AppID:     cfg.Feishu.AppID,
