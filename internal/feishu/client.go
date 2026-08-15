@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkevent "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
 type Config struct {
@@ -114,9 +116,9 @@ func (c *Client) Send(ctx context.Context, openID string, content string) error 
 	}
 
 	payload := map[string]interface{}{
-		"receive_id":  openID,
-		"msg_type":    "text",
-		"content":     map[string]string{"text": content},
+		"receive_id": openID,
+		"msg_type":   "text",
+		"content":    map[string]string{"text": content},
 	}
 	data, _ := json.Marshal(payload)
 
@@ -164,121 +166,65 @@ func (c *Client) SendChunk(openID, session, chunk string) {
 	}
 }
 
-// Start 启动 WebSocket 连接
-func (c *Client) Start(ctx context.Context, handler func(Event)) error {
-	token, err := c.getAccessToken(ctx)
-	if err != nil {
-		return fmt.Errorf("websocket: token %w", err)
+// extractText 从飞书消息 Content（JSON 序列化字符串）中提取纯文本。
+// 文本消息格式: {"text":"你好"}；其他类型（卡片/图片等）返回空串。
+func extractText(content string) string {
+	var v struct {
+		Text string `json:"text"`
 	}
-
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	headers := http.Header{}
-	headers.Set("Authorization", "Bearer "+token)
-
-	conn, _, err := dialer.Dial(c.cfg.WsURL, headers)
-	if err != nil {
-		return fmt.Errorf("websocket dial: %w", err)
+	if err := json.Unmarshal([]byte(content), &v); err == nil && v.Text != "" {
+		return v.Text
 	}
-	log.Printf("[feishu] WebSocket connected to %s", c.cfg.WsURL)
-
-	go c.wsLoop(ctx, conn, handler)
-
-	// 启动时重连
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				time.Sleep(5 * time.Second)
-				if conn.RemoteAddr() == nil {
-					log.Printf("[feishu] connection lost, reconnecting...")
-					err := c.Start(ctx, handler)
-					if err != nil {
-						log.Printf("[feishu] reconnect failed: %v", err)
-					}
-				}
-			}
-		}
-	}()
-
-	return nil
+	return ""
 }
 
-func (c *Client) wsLoop(ctx context.Context, conn *websocket.Conn, handler func(Event)) {
-	defer func() {
-		log.Printf("[feishu] WebSocket disconnected")
-		conn.Close()
+// Start 启动飞书长连接（官方 SDK WS 客户端：自动端点发现/心跳/重连）。
+// handler 收到 P2MessageReceiveV1 事件（含文本消息）。
+func (c *Client) Start(ctx context.Context, handler func(Event)) error {
+	dispatcher := larkevent.NewEventDispatcher("", "")
+	dispatcher.OnP2MessageReceiveV1(func(evCtx context.Context, event *larkim.P2MessageReceiveV1) error {
+		msg := event.Event.Message
+		content := ""
+		if msg != nil && msg.Content != nil {
+			// Content 是 JSON 序列化字符串，如 {"text":"你好"}；解析出 text 字段
+			content = extractText(*msg.Content)
+		}
+		senderID := ""
+		if event.Event.Sender != nil && event.Event.Sender.SenderId != nil {
+			if oid := event.Event.Sender.SenderId.OpenId; oid != nil {
+				senderID = *oid
+			}
+		}
+		log.Printf("[feishu] msg received, sender=%s content=%s", senderID, content)
+		handler(Event{Type: "message", SenderID: senderID, Message: Message{Content: content}})
+		return nil
+	})
+
+	cli := larkws.NewClient(c.cfg.AppID, c.cfg.AppSecret,
+		larkws.WithEventHandler(dispatcher),
+		larkws.WithLogLevel(larkcore.LogLevelError),
+	)
+	cli.SetOnReady(func() {
+		log.Printf("[feishu] WebSocket connected (long connection)")
+	})
+	cli.SetOnDisconnected(func() {
+		log.Printf("[feishu] WebSocket disconnected, will reconnect")
+	})
+	cli.SetOnError(func(err error) {
+		log.Printf("[feishu] ws error: %v", err)
+	})
+
+	go func() {
+		if err := cli.Start(ctx); err != nil {
+			log.Printf("[feishu] ws start failed: %v", err)
+		}
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					return
-				}
-				log.Printf("[feishu] ws read error: %v", err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			var evt struct {
-				EventType string `json:"event_type"`
-				Header    struct {
-					EventID string `json:"event_id"`
-				} `json:"header"`
-				Event struct {
-					SenderID string `json:"sender_id"`
-					Message  struct {
-						Content string `json:"content"`
-						Type    string `json:"msg_type"`
-						Text    string `json:"text"`
-					} `json:"message"`
-				} `json:"event"`
-			}
-
-			if err := json.Unmarshal(msg, &evt); err != nil {
-				log.Printf("[feishu] event decode error: %v", err)
-				continue
-			}
-
-			// 只处理用户消息事件
-			if evt.EventType != "im.message.receive_v1" {
-				continue
-			}
-
-			// 获取消息内容
-			text := evt.Event.Message.Text
-			if text == "" {
-				// 尝试从 content JSON 中解析
-				var contentMap map[string]interface{}
-				json.Unmarshal([]byte(evt.Event.Message.Content), &contentMap)
-				if t, ok := contentMap["text"].(string); ok {
-					text = t
-				}
-			}
-			if text == "" {
-				text = evt.Event.Message.Content
-			}
-
-			// 去掉 @机器人 标记
-			text = strings.TrimPrefix(text, "@")
-
-			if text == "" {
-				continue
-			}
-
-			log.Printf("[feishu] msg from=%s content=%q", evt.Event.SenderID, text)
-
-			handler(Event{
-				Type:     evt.EventType,
-				SenderID: evt.Event.SenderID,
-				Message:  Message{Content: text},
-			})
-		}
+	// 简单探测：等 3 秒看是否连接成功（OnReady 会打印日志）
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(3 * time.Second):
 	}
+	return nil
 }
