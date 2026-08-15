@@ -527,13 +527,15 @@ func (c *Client) EditMessage(messageID, content string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		var result struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		json.Unmarshal(body, &result)
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	json.Unmarshal(body, &result)
+	// 注意：HTTP 200 时 body 的 code 仍可能非 0（如 230072 编辑次数超限/99991663 消息不可编辑），
+	// 必须同时检查 code，否则会静默吞掉失败（用户看到"处理中"不更新）。
+	if resp.StatusCode != 200 || result.Code != 0 {
 		return fmt.Errorf("edit: status=%d code=%d msg=%q resp=%s", resp.StatusCode, result.Code, result.Msg, truncate(string(body), 300))
 	}
 	return nil
