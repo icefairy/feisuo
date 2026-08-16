@@ -227,6 +227,7 @@ const (
 
 type streamState struct {
 	msgID        string    // 已发送的消息 ID，流式期间反复编辑它
+	openID       string    // 接收者 open_id（roll 新消息用，不能拿 session 名当 open_id！）
 	session      string
 	full         string    // 累积的完整文本（每次编辑发全文，保证前面的内容不丢）
 	buf          string    // 待 flush 的增量（防抖用）
@@ -250,7 +251,7 @@ func (c *Client) StreamBegin(openID, session string) {
 	}
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
-	c.streams[key] = &streamState{msgID: msgID, session: session, lastEdit: time.Now()}
+	c.streams[key] = &streamState{msgID: msgID, openID: openID, session: session, lastEdit: time.Now()}
 }
 
 // StreamChunk 累积增量，按编辑间隔/字符阈值编辑同一消息；
@@ -330,7 +331,7 @@ func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
 		}
 	}()
 	// 开新消息：从当前全文继续（新消息获得新的 20 次编辑预算）
-	newID, err := c.sendAndGetID(session, cur)
+	newID, err := c.sendAndGetID(st.openID, cur)
 	if err != nil {
 		// 新消息失败：进入 fallback，等最终结果直接发
 		log.Printf("[feishu] roll new message failed, fallback: %v", err)

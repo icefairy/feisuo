@@ -238,6 +238,9 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 				// 通知飞书（流式编辑模式：一条消息内滚动更新）
 				fc.StreamBegin(msg.Sender, name)
 
+				// 串行化：等本条 Execute 的 onDone 完成后才处理下一条消息，
+				// 否则连续消息会并发 prompt → pi 报 "Agent is already processing"
+				doneCh := make(chan struct{})
 				piEng.Execute(ctx, name, msg.Content,
 					func(chunk string) {
 						sm.SetMessage(name, chunk)
@@ -245,6 +248,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 						st.Save(se)
 					},
 					func(final string, err error) {
+						defer close(doneCh)
 						if err != nil {
 							sm.SetStatus(name, "error")
 							se.Err = err.Error()
@@ -291,6 +295,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 						time.Sleep(2 * time.Second)
 						sm.SetStatus(name, "idle")
 					})
+				<-doneCh // 等本条完成后再取下一条（串行）
 			}
 		}
 	}
