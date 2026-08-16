@@ -303,6 +303,31 @@ func (c *rpcClient) send(v any) error {
 	return c.stdin.Flush()
 }
 
+// newSession 透传 pi 原生 reset：切换到全新 session（清空上下文）。
+// 等价 pi 交互模式的 /new。旧 session 文件留磁盘（可 switch_session 找回）。
+func (c *rpcClient) newSession() error {
+	return c.send(map[string]any{"type": "new_session"})
+}
+
+// clearPending 清空该进程所有 pending prompt（reset 时若 agent 正在跑，
+// 需要立即结束所有等待者，否则他们会永远等 agent_settled 而卡死）。
+func (c *rpcClient) clearPending(errMsg string) {
+	c.mu.Lock()
+	pend := c.pending
+	pendOrder := c.pendingOrder
+	c.pending = map[string]*pendingPrompt{}
+	c.pendingOrder = nil
+	c.mu.Unlock()
+	for _, id := range pendOrder {
+		if p, ok := pend[id]; ok {
+			if p.timer != nil {
+				p.timer.Stop()
+			}
+			p.onDone(strings.TrimSpace(p.buf.String()), fmt.Errorf("%s", errMsg))
+		}
+	}
+}
+
 // close 关闭常驻进程。
 func (c *rpcClient) close() {
 	c.mu.Lock()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"feisuo/internal/auth"
@@ -534,6 +535,29 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		}
 		fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
 
+	case "reset":
+		// /RESET <会话> → 透传 pi 原生 new_session：清空该会话的对话上下文（进程不重启）
+		name := cmd.Arg
+		if name == "" {
+			fc.Reply(sender, "❌ /RESET <会话> — 请指定会话名")
+			return
+		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
+			return
+		}
+		if err := piEng.Reset(name); err != nil {
+			fc.Reply(sender, fmt.Sprintf("❌ 重置会话 `%s` 失败: %v", name, err))
+			return
+		}
+		// 重置后若会话曾在处理中，busy 状态清掉
+		if se, ok := sm.Get(name); ok {
+			se.Err = ""
+			sm.SetStatus(name, "idle")
+			st.Save(se)
+		}
+		fc.Reply(sender, fmt.Sprintf("🔄 已重置会话 `%s`（对话上下文已清空，历史无法恢复）", name))
+
 	case "name", "rename":
 		parts := protocol.SplitTwo(cmd.Arg)
 		if parts[0] == "" || parts[1] == "" {
@@ -550,7 +574,8 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /ROLE <会话> [--role "描述"] 设置/查看会话角色
   /LIST               列出所有会话
   /STATUS             查看会话状态
-  /KILL <会话>        终止会话
+  /KILL <会话>        终止会话（上下文保留，复活后恢复）
+  /RESET <会话>       重置会话（透传 pi /new：清空对话上下文）
   /NAME <旧> <新>     重命名会话
   普通消息            发给默认会话(main)`)
 
@@ -567,10 +592,16 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 		case <-ctx.Done():
 			return
 		default:
-			var line string
+			// 用 Scanner 读整行（fmt.Scanln 只读单 token，/RESET main 会被拆坏）
 			fmt.Print("feisuo> ")
-			if _, err := fmt.Scanln(&line); err != nil {
+			sc := bufio.NewScanner(os.Stdin)
+			sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+			if !sc.Scan() {
 				return
+			}
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
 			}
 			if line == "quit" || line == "exit" {
 				return

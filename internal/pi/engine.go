@@ -185,6 +185,23 @@ func (e *Engine) Kill(session string) {
 	}
 }
 
+// Reset 透传 pi 原生 new_session（等价 pi 交互模式 /new）：
+// 在常驻进程内切换到全新 session，清空该会话的对话上下文。
+// 若会话进程不存在，下次消息会重新启动（空上下文，效果相同）。
+// 若 agent 正在跑，清空 pending 防止等待者卡死。
+func (e *Engine) Reset(session string) error {
+	e.mu.Lock()
+	c, ok := e.clients[session]
+	e.mu.Unlock()
+	if !ok || c == nil {
+		log.Printf("[pi/%s] reset: no rpc process (will start fresh on next message)", session)
+		return nil
+	}
+	log.Printf("[pi/%s] reset: sending new_session", session)
+	c.clearPending("session reset")
+	return c.newSession()
+}
+
 // SessionCount 返回活跃常驻进程数（调试用）。
 func (e *Engine) SessionCount() int {
 	e.mu.Lock()
