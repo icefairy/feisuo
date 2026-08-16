@@ -1,5 +1,5 @@
 // Package socket 提供 feisuo 的控制/介入通道：
-// - Server：监听 Unix socket，广播会话收发事件，接收 attach 客户端的输入注入
+// - Server：监听通道（Linux: Unix socket；Windows: 127.0.0.1 TCP），广播会话收发事件，接收 attach 客户端的输入注入
 // - Client：feisuo attach 命令用，连接 server 显示广播 + 发送输入
 package socket
 
@@ -9,12 +9,28 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 )
+
+// winTCPAddr Windows 平台 attach 通道的固定本地地址。
+// 只绑 127.0.0.1 避免暴露到局域网；端口冲突时改这里或 DefaultAddr。
+const winTCPAddr = "127.0.0.1:52821"
+
+// DefaultAddr 返回 attach 通道地址：
+//   - Linux/macOS: <dataDir>/feisuo.sock（Unix socket 文件）
+//   - Windows: 127.0.0.1:52821（Windows 无 Unix socket，用本地 TCP）
+func DefaultAddr(dataDir string) string {
+	if runtime.GOOS == "windows" {
+		return winTCPAddr
+	}
+	return dataDir + string(os.PathSeparator) + "feisuo.sock"
+}
 
 // Server 会话广播服务器
 type Server struct {
 	path string
+	addr string
 	ln   net.Listener
 	mu   sync.Mutex
 	subs map[net.Conn]bool
@@ -22,18 +38,32 @@ type Server struct {
 	OnInput func(session, content, sender string)
 }
 
+// NewServer 创建广播服务器。path 由 DefaultAddr 提供。
 func NewServer(path string) *Server {
 	return &Server{path: path, subs: make(map[net.Conn]bool)}
 }
 
-// Start 启动监听（unix socket）。失败返回 error（如路径已占用）。
+// Start 启动监听（Linux: unix socket；Windows: TCP）。失败返回 error（如地址已占用）。
 func (s *Server) Start() error {
+	if runtime.GOOS == "windows" {
+		// Windows 无 unix socket：监听本地 TCP
+		ln, err := net.Listen("tcp", s.path)
+		if err != nil {
+			return err
+		}
+		s.ln = ln
+		s.addr = s.path
+		go s.acceptLoop()
+		log.Printf("[socket] listening on tcp %s", s.addr)
+		return nil
+	}
 	os.Remove(s.path) // 清理残留 socket 文件
 	ln, err := net.Listen("unix", s.path)
 	if err != nil {
 		return err
 	}
 	s.ln = ln
+	s.addr = s.path
 	go s.acceptLoop()
 	log.Printf("[socket] listening on %s", s.path)
 	return nil
@@ -104,7 +134,9 @@ func (s *Server) Close() {
 	if s.ln != nil {
 		s.ln.Close()
 	}
-	os.Remove(s.path)
+	if runtime.GOOS != "windows" {
+		os.Remove(s.path) // unix socket 文件需清理；TCP 无文件
+	}
 }
 
 // --- Client ---
@@ -115,9 +147,15 @@ type Client struct {
 	sc   *bufio.Scanner
 }
 
-// Connect 连接 unix socket
+// Connect 连接 attach 通道（Linux: unix socket；Windows: TCP）
 func Connect(path string) (*Client, error) {
-	conn, err := net.Dial("unix", path)
+	var conn net.Conn
+	var err error
+	if runtime.GOOS == "windows" {
+		conn, err = net.Dial("tcp", path)
+	} else {
+		conn, err = net.Dial("unix", path)
+	}
 	if err != nil {
 		return nil, err
 	}

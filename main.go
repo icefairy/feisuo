@@ -110,8 +110,8 @@ func main() {
 	authList, pending := authStore.List()
 	log.Printf("[auth] authorized users: %d, pending: %d", len(authList), len(pending))
 
-	// 会话介入通道（Unix socket）：tmux 里 feisuo attach <会话> 可实时看/输入
-	sockPath := filepath.Join(cfg.Sessions.DataDir, "feisuo.sock")
+	// 会话介入通道（Linux: Unix socket；Windows: 本地 TCP）：tmux/终端里 feisuo attach <会话> 可实时看/输入
+	sockPath := socket.DefaultAddr(cfg.Sessions.DataDir)
 	sockSrv := socket.NewServer(sockPath)
 	if err := sockSrv.Start(); err != nil {
 		log.Printf("[socket] start failed: %v", err)
@@ -644,7 +644,7 @@ func runAttachCmd(args []string) {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	sockPath := filepath.Join(cfg.Sessions.DataDir, "feisuo.sock")
+	sockPath := socket.DefaultAddr(cfg.Sessions.DataDir)
 	cli, err := socket.Connect(sockPath)
 	if err != nil {
 		log.Fatalf("attach: %v（feisuo 未运行？socket=%s）", err, sockPath)

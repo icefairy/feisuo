@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,17 @@ func startRPC(ctx context.Context, cfg Config) (*rpcClient, error) {
 	binary := cfg.Binary
 	if binary == "" {
 		binary = "pi"
+	}
+	if runtime.GOOS == "windows" {
+		// Windows npm 全局安装生成 pi.cmd（不是 pi），且 exec.Command 不能直接跑 .cmd。
+		// 用 LookPath 解析完整路径（.cmd/.exe）；找不到则原样交给 Start 报错。
+		if p, err := exec.LookPath(binary); err == nil {
+			binary = p
+		} else if p, err := exec.LookPath(binary + ".cmd"); err == nil {
+			binary = p
+		} else if p, err := exec.LookPath(binary + ".exe"); err == nil {
+			binary = p
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
@@ -339,6 +351,12 @@ func (c *rpcClient) close() {
 	close(c.shutdown)
 	c.mu.Unlock()
 	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+		if runtime.GOOS == "windows" {
+			// Windows 上 Process.Kill() 只杀 pi.cmd（cmd.exe 壳），node 子进程会残留成僵尸。
+			// taskkill /T 杀整个进程树。
+			_ = exec.Command("taskkill", "/PID", fmt.Sprint(c.cmd.Process.Pid), "/T", "/F").Run()
+		} else {
+			_ = c.cmd.Process.Kill()
+		}
 	}
 }
