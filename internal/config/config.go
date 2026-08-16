@@ -8,18 +8,9 @@ import (
 )
 
 type Config struct {
-	Feishu   FeishuConfig   `yaml:"feishu"`
-	Pi       PiConfig       `yaml:"pi"`
-	Sessions SessionConfig  `yaml:"sessions"`
-	Intent   IntentConfig   `yaml:"intent"`
-}
-
-type IntentConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Model   string `yaml:"model"`
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Timeout int    `yaml:"timeout"` // seconds
+	Feishu   FeishuConfig  `yaml:"feishu"`
+	Pi       PiConfig      `yaml:"pi"`
+	Sessions SessionConfig `yaml:"sessions"`
 }
 
 type FeishuConfig struct {
@@ -77,15 +68,6 @@ func applyDefaults(c *Config) {
 	}
 	if c.Sessions.DefaultName == "" {
 		c.Sessions.DefaultName = "main"
-	}
-	if c.Intent.Model == "" {
-		c.Intent.Model = "glm4:9b"
-	}
-	if c.Intent.BaseURL == "" {
-		c.Intent.BaseURL = "http://127.0.0.1:3002/v1"
-	}
-	if c.Intent.Timeout == 0 {
-		c.Intent.Timeout = 8
 	}
 }
 

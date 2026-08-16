@@ -15,7 +15,6 @@ import (
 	"feisuo/internal/bridge"
 	"feisuo/internal/config"
 	"feisuo/internal/feishu"
-	"feisuo/internal/intent"
 	"feisuo/internal/pi"
 	"feisuo/internal/protocol"
 	"feisuo/internal/session"
@@ -159,15 +158,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 意图路由（普通消息自动解析发往哪个会话；/ 开头命令不受影响）
-	var router *intent.Router
-	if cfg.Intent.Enabled {
-		router = intent.New(cfg.Intent.Enabled, cfg.Intent.Model, cfg.Intent.BaseURL, cfg.Intent.APIKey, cfg.Intent.Timeout)
-		log.Printf("意图路由已启用: model=%s", cfg.Intent.Model)
-	} else {
-		log.Printf("意图路由未启用（普通消息直接发默认会话）")
-	}
-
 	// 用 started 记录已启动的会话循环
 	started := make(map[string]bool)
 
@@ -230,7 +220,7 @@ func main() {
 			fc.Reply(ev.SenderID, fmt.Sprintf("🔒 你还没有授权使用飞梭。\n你的用户 ID: `%s`\n请管理员执行: `feisuo approve %s`\n授权后即可使用。", ev.SenderID, ev.SenderID))
 			return
 		}
-		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, router, cfg.Sessions.DefaultName)
+		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, cfg.Sessions.DefaultName)
 	})
 	if err != nil {
 		log.Fatalf("feishu: %v", err)
@@ -239,7 +229,7 @@ func main() {
 	fmt.Printf("飞梭 feisuo 启动\n")
 	fmt.Printf("  飞书: %s | 默认会话: %s\n", cfg.Feishu.BotName, cfg.Sessions.DefaultName)
 	fmt.Printf("  Pi: %s @ %s\n", cfg.Pi.Model, cfg.Pi.BaseURL)
-	fmt.Printf("  命令: /TO <会话> <消息> | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
+	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 
 	go handleLocalInput(ctx, parser, sm, piEng, fc, s, startLoop, cfg.Sessions.DefaultName)
@@ -354,7 +344,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 }
 
 func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
-	parser *protocol.Parser, sm *session.Manager, piEng *pi.Engine, st *store.Store, startLoop func(string), router *intent.Router, defaultName string) {
+	parser *protocol.Parser, sm *session.Manager, piEng *pi.Engine, st *store.Store, startLoop func(string), defaultName string) {
 
 	msg := ev.Message
 	sender := ev.SenderID
@@ -366,74 +356,16 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 		return
 	}
 
-	// 非命令消息：先尝试意图路由（自动解析发往哪个会话 + 会话管理指令）
-	if router != nil && router.Enabled() {
-		route := router.Resolve(sm.List(), defaultName, msg.Content)
-		switch route.Action {
-		case intent.ActionList:
-			fc.Reply(sender, "📋 当前会话:\n"+sm.FormatStatus())
-			return
-		case intent.ActionNew:
-			name := route.Target
-			if sm.Exists(name) {
-				fc.Reply(sender, fmt.Sprintf("⚠️ 会话 `%s` 已存在，用 /LIST 查看", name))
-				return
-			}
-			sm.Create(name)
-			if route.Role != "" {
-				sm.SetRole(name, route.Role)
-			}
-			startLoop(name)
-			if se, ok := sm.Get(name); ok {
-				st.Save(se)
-			}
-			if route.Role != "" {
-				fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`，角色: %s", name, route.Role))
-			} else {
-				fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
-			}
-			return
-		case intent.ActionKill:
-			name := route.Target
-			if !sm.Exists(name) {
-				fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
-				return
-			}
-			if name == defaultName {
-				fc.Reply(sender, "❌ 不能关闭默认会话 `main`")
-				return
-			}
-			piEng.Kill(name)
-			sm.Kill(name)
-			if se, ok := sm.Get(name); ok {
-				st.Save(se) // 持久化 stopped 状态：重启后不恢复
-			}
-			fc.Reply(sender, fmt.Sprintf("🗑 已关闭会话: `%s`（pi 进程已终止）", name))
-			return
-		}
-
-		// send：目标会话可能已停止（Kill 过），自动复活
-		target, content := route.Target, route.Content
-		if target != defaultName && !sm.Exists(target) {
-			log.Printf("[intent] target %q not exists, fallback to %q", target, defaultName)
-			fc.Reply(sender, fmt.Sprintf("🤖 你想发给会话 `%s`，但它不存在。可 /NEW %s 创建，或 /TO %s <消息> 精确发送。已回退到默认会话。", target, target, target))
-			target = defaultName
-			content = msg.Content
-		}
-		// stopped 会话自动复活（重建队列 + 重启循环）
-		if sm.Exists(target) && sm.Reopen(target) {
-			startLoop(target)
-			log.Printf("[intent] session %q reopened", target)
-		}
-		sm.Enqueue(target, session.Message{Content: content, Sender: sender})
-		return
+	// 普通消息：发往当前对话的会话（/TO 切换后记住；未切换时默认会话）
+	target := sm.Current(sender, defaultName)
+	if target != defaultName && !sm.Exists(target) {
+		log.Printf("[dispatch] current session %q not exists, fallback to %q", target, defaultName)
+		target = defaultName
 	}
-
-	target := "main"
 	// stopped 会话自动复活（重建队列 + 重启循环）
 	if sm.Exists(target) && sm.Reopen(target) {
 		startLoop(target)
-		log.Printf("[intent] session %q reopened", target)
+		log.Printf("[dispatch] session %q reopened", target)
 	}
 	sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender})
 }
@@ -495,25 +427,31 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		fc.Reply(sender, sm.FormatStatus())
 
 	case "to":
-		// parser 已拆分好：cmd.Session=会话名, cmd.Arg=消息（不要重复 SplitTwo！）
+		// parser 已拆分好：cmd.Session=会话名, cmd.Arg=消息（可能为空，仅切换）
 		name := cmd.Session
 		if name == "" {
-			fc.Reply(sender, "❌ /TO <会话> <消息> — 请指定会话名和消息")
+			fc.Reply(sender, "❌ /TO <会话> [<消息>] — 请指定会话名")
 			return
 		}
 		if !sm.Exists(name) {
 			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，先 /NEW %s", name, name))
 			return
 		}
+		// 切换当前会话：此 sender 后续普通消息默认发往这里
+		sm.SetCurrent(sender, name)
 		// stopped 会话自动复活
 		if sm.Reopen(name) {
 			startLoop(name)
 			log.Printf("[session/%s] reopened via /TO", name)
 		}
-		sm.Enqueue(name, session.Message{
-			Content: cmd.Arg,
-			Sender:  sender,
-		})
+		if cmd.Arg != "" {
+			sm.Enqueue(name, session.Message{
+				Content: cmd.Arg,
+				Sender:  sender,
+			})
+		} else {
+			fc.Reply(sender, fmt.Sprintf("🔀 已切换到会话 `%s`，后续消息将发送到这里（/TO %s <消息> 可带消息发送）", name, name))
+		}
 
 	case "kill":
 		name := cmd.Arg
@@ -570,7 +508,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 
 	case "help":
 		fc.Reply(sender, `🤖 飞梭命令:
-  /TO <会话> <消息>    发给指定会话
+  /TO <会话> [<消息>]  切换到指定会话（可带消息直接发送）
   /NEW <名称> [--role "描述"]  创建新会话（可带角色）
   /ROLE <会话> [--role "描述"] 设置/查看会话角色
   /LIST               列出所有会话
@@ -578,7 +516,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /KILL <会话>        终止会话（上下文保留，复活后恢复）
   /RESET <会话>       重置会话（透传 pi /new：清空对话上下文）
   /NAME <旧> <新>     重命名会话
-  普通消息            发给默认会话(main)`)
+  普通消息            发给当前会话（/TO 切换后发往新会话）`)
 
 	default:
 		fc.Reply(sender, fmt.Sprintf("❌ 未知命令: %s，用 /HELP 查看", cmd.Cmd))
@@ -611,7 +549,15 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 			if cmd.Type == protocol.CmdCommand {
 				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, piEng, defaultName)
 			} else {
-				sm.Enqueue("main", session.Message{Content: line, Sender: "local"})
+				// 本地输入同样发往当前对话的会话（/TO 切换后记住）
+				target := sm.Current("local", defaultName)
+				if target != defaultName && !sm.Exists(target) {
+					target = defaultName
+				}
+				if sm.Exists(target) && sm.Reopen(target) {
+					startLoop(target)
+				}
+				sm.Enqueue(target, session.Message{Content: line, Sender: "local"})
 			}
 		}
 	}

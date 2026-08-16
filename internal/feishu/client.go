@@ -56,6 +56,13 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg, httpCli: &http.Client{Timeout: 30 * time.Second}, streams: make(map[string]*streamState)}
 }
 
+// SetBaseURL 覆盖飞书端点（测试注入 mock server 用）
+func (c *Client) SetBaseURL(base string) {
+	tokenURL = base + "/open-apis/auth/v3/tenant_access_token/internal"
+	sendMsgURL = base + "/open-apis/im/v1/messages?receive_id_type=open_id"
+	editMsgURL = base + "/open-apis/im/v1/messages/"
+}
+
 // getAccessToken 获取 tenant_access_token（缓存，过期自动重新获取）
 func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 	c.tokenMu.RLock()

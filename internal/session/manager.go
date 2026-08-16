@@ -40,10 +40,32 @@ func NewSession(name string) *Session {
 type Manager struct {
 	sessions map[string]*Session
 	mu       sync.RWMutex
+
+	// current 记录每个 sender 当前正在对话的会话（/TO 切换后记住，普通消息发往这里）
+	curMu    sync.Mutex
+	current  map[string]string
 }
 
 func New() *Manager {
-	return &Manager{sessions: make(map[string]*Session)}
+	return &Manager{sessions: make(map[string]*Session), current: make(map[string]string)}
+}
+
+// SetCurrent 记录 sender 当前正在对话的会话（/TO <会话> 切换时调用）。
+// 此后该 sender 的普通消息默认发往此会话。
+func (m *Manager) SetCurrent(sender, name string) {
+	m.curMu.Lock()
+	defer m.curMu.Unlock()
+	m.current[sender] = name
+}
+
+// Current 返回 sender 当前对话的会话名；未设置过则回退 defaultName。
+func (m *Manager) Current(sender, defaultName string) string {
+	m.curMu.Lock()
+	defer m.curMu.Unlock()
+	if name, ok := m.current[sender]; ok && name != "" {
+		return name
+	}
+	return defaultName
 }
 
 func (m *Manager) EnsureDefault(name string) {

@@ -50,3 +50,11 @@ func TestParseToUnaffected(t *testing.T) {
 		t.Errorf("got cmd=%s session=%q role=%q", c.Cmd, c.Session, c.Role)
 	}
 }
+
+// TestParseToSwitchOnly：/TO 不带消息 = 纯切换（session 有值，arg 空）
+func TestParseToSwitchOnly(t *testing.T) {
+	c := New().Parse(`/TO work`)
+	if c.Cmd != "to" || c.Session != "work" || c.Arg != "" {
+		t.Errorf("got cmd=%s session=%q arg=%q", c.Cmd, c.Session, c.Arg)
+	}
+}
