@@ -25,6 +25,13 @@ type Config struct {
 	WsURL     string
 }
 
+// 包级 URL 变量：生产用默认飞书端点，测试可注入 mock server
+var (
+	tokenURL   = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+	sendMsgURL = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
+	editMsgURL = "https://open.feishu.cn/open-apis/im/v1/messages/"
+)
+
 type Event struct {
 	Type     string
 	SenderID string
@@ -71,7 +78,7 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 		"app_secret": c.cfg.AppSecret,
 	}
 	data, _ := json.Marshal(body)
-	resp, err := c.httpCli.Post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+	resp, err := c.httpCli.Post(tokenURL,
 		"application/json", bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("token: %w", err)
@@ -92,8 +99,8 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("token API: code=%d msg=%s", result.Code, result.Msg)
 	}
 	c.token = result.TenantToken
-	// expire 单位秒；提前 60s 刷新避免边界过期
-	c.tokenExp = time.Now().Add(time.Duration(result.Expire-60) * time.Second)
+	// expire 单位秒；提前 10 分钟过期（对齐 lark SDK TokenManager 范式，杜绝边界过期 400）
+	c.tokenExp = time.Now().Add(time.Duration(result.Expire-600) * time.Second)
 	log.Printf("[feishu] token obtained, expire=%ds (refresh at %s)", result.Expire, c.tokenExp.Format("15:04:05"))
 	return c.token, nil
 }
@@ -149,8 +156,63 @@ func splitParts(s string, n int) []string {
 	return parts
 }
 
-// sendOne 发送单条（≤3800 字符）
+// ---- 发送重试（参考 Hermes _feishu_send_with_retry：3 次 + 指数退避）----
+const (
+	sendAttempts       = 3
+	sendRetryBaseDelay = time.Second
+)
+
+// 飞书 token 错误码：token 无效 / 过期 → 强制刷新后重试
+const (
+	feishuCodeInvalidToken = 99991663 // Invalid access token
+	feishuCodeTokenExpired = 99991664 // Access token expired
+)
+
+func isTokenErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "99991663") || strings.Contains(s, "99991664")
+}
+
+// forceRefreshToken 清空 token 缓存，下次 getAccessToken 必然重新获取
+func (c *Client) forceRefreshToken() {
+	c.tokenMu.Lock()
+	c.token = ""
+	c.tokenExp = time.Time{}
+	c.tokenMu.Unlock()
+}
+
+// sendOne 发送单条（≤3800 字符），带 3 次指数退避重试；
+// token 无效/过期错误 → 强制刷新后立即重试（不计入退避次数）。
 func (c *Client) sendOne(ctx context.Context, openID string, content string) error {
+	var lastErr error
+	for attempt := 0; attempt < sendAttempts; attempt++ {
+		lastErr = c.sendOnce(ctx, openID, content)
+		if lastErr == nil {
+			return nil
+		}
+		if isTokenErr(lastErr) {
+			log.Printf("[feishu] send token error (attempt %d/%d), refreshing token: %v", attempt+1, sendAttempts, lastErr)
+			c.forceRefreshToken()
+			continue
+		}
+		if attempt < sendAttempts-1 {
+			wait := sendRetryBaseDelay * time.Duration(1<<attempt) // 1s, 2s
+			log.Printf("[feishu] send attempt %d/%d failed for %s, retry in %v: %v", attempt+1, sendAttempts, truncate(openID, 40), wait, lastErr)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+	}
+	return lastErr
+}
+
+// sendOnce 单次 HTTP 发送（≤3800 字符）
+func (c *Client) sendOnce(ctx context.Context, openID string, content string) error {
 	token, err := c.getAccessToken(ctx)
 	if err != nil {
 		return err
@@ -166,7 +228,7 @@ func (c *Client) sendOne(ctx context.Context, openID string, content string) err
 	data, _ := json.Marshal(payload)
 
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+		sendMsgURL,
 		bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -508,8 +570,31 @@ func minDur(a, b time.Duration) time.Duration {
 	return b
 }
 
-// sendAndGetID 发送消息并返回 message_id
+// sendAndGetID 发送消息并返回 message_id（带 3 次退避重试 + token 过期刷新）
 func (c *Client) sendAndGetID(openID, content string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < sendAttempts; attempt++ {
+		msgID, err := c.sendAndGetIDOnce(openID, content)
+		if err == nil {
+			return msgID, nil
+		}
+		lastErr = err
+		if isTokenErr(err) {
+			log.Printf("[feishu] create token error (attempt %d/%d), refreshing token: %v", attempt+1, sendAttempts, err)
+			c.forceRefreshToken()
+			continue
+		}
+		if attempt < sendAttempts-1 {
+			wait := sendRetryBaseDelay * time.Duration(1<<attempt)
+			log.Printf("[feishu] create attempt %d/%d failed for %s, retry in %v: %v", attempt+1, sendAttempts, truncate(openID, 40), wait, err)
+			time.Sleep(wait)
+		}
+	}
+	return "", lastErr
+}
+
+// sendAndGetIDOnce 单次发送并返回 message_id
+func (c *Client) sendAndGetIDOnce(openID, content string) (string, error) {
 	token, err := c.getAccessToken(context.Background())
 	if err != nil {
 		return "", err
@@ -522,7 +607,7 @@ func (c *Client) sendAndGetID(openID, content string) (string, error) {
 	}
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+		sendMsgURL,
 		bytes.NewReader(data))
 	if err != nil {
 		return "", err
@@ -549,7 +634,30 @@ func (c *Client) sendAndGetID(openID, content string) (string, error) {
 }
 
 // EditMessage 编辑已发送消息（PUT /im/v1/messages/:message_id）
+// 带 3 次退避重试 + token 过期刷新（流式编辑路径，失败率最高）
 func (c *Client) EditMessage(messageID, content string) error {
+	var lastErr error
+	for attempt := 0; attempt < sendAttempts; attempt++ {
+		lastErr = c.editOnce(messageID, content)
+		if lastErr == nil {
+			return nil
+		}
+		if isTokenErr(lastErr) {
+			log.Printf("[feishu] edit token error (attempt %d/%d), refreshing token: %v", attempt+1, sendAttempts, lastErr)
+			c.forceRefreshToken()
+			continue
+		}
+		if attempt < sendAttempts-1 {
+			wait := sendRetryBaseDelay * time.Duration(1<<attempt)
+			log.Printf("[feishu] edit attempt %d/%d failed, retry in %v: %v", attempt+1, sendAttempts, wait, lastErr)
+			time.Sleep(wait)
+		}
+	}
+	return lastErr
+}
+
+// editOnce 单次编辑
+func (c *Client) editOnce(messageID, content string) error {
 	token, err := c.getAccessToken(context.Background())
 	if err != nil {
 		return err
@@ -561,7 +669,7 @@ func (c *Client) EditMessage(messageID, content string) error {
 	}
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(context.Background(), "PUT",
-		"https://open.feishu.cn/open-apis/im/v1/messages/"+messageID,
+		editMsgURL+messageID,
 		bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -627,6 +735,12 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 	)
 	cli.SetOnReady(func() {
 		log.Printf("[feishu] WebSocket connected (long connection)")
+	})
+	cli.SetOnReconnecting(func() {
+		log.Printf("[feishu] WebSocket reconnecting...")
+	})
+	cli.SetOnReconnected(func() {
+		log.Printf("[feishu] WebSocket reconnected (long connection)")
 	})
 	cli.SetOnDisconnected(func() {
 		log.Printf("[feishu] WebSocket disconnected, will reconnect")
