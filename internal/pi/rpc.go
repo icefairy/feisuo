@@ -184,16 +184,19 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 			delta, _ := ame["delta"].(string)
 			c.mu.Lock()
 			// 只发给最早 pending（当前正在跑的 prompt；followUp 排队的后序 prompt 还没开始）
+			var cb func(string)
 			if len(c.pendingOrder) > 0 {
 				first := c.pendingOrder[0]
 				if p, ok := c.pending[first]; ok {
 					p.buf.WriteString(delta)
-					if p.onChunk != nil {
-						p.onChunk(delta)
-					}
+					cb = p.onChunk
 				}
 			}
 			c.mu.Unlock()
+			// 锁外回调：onChunk 可能进入 onProcessError→close 再次拿 c.mu，持锁调用会自锁死锁
+			if cb != nil {
+				cb(delta)
+			}
 		}
 
 	case "agent_settled":
@@ -229,14 +232,19 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 		if id != "" && !okFlag {
 			errMsg, _ := ev["error"].(string)
 			c.mu.Lock()
-			if p, ok := c.pending[id]; ok {
+			var p *pendingPrompt
+			if pp, ok := c.pending[id]; ok {
 				c.removePendingLocked(id)
-				if p.timer != nil {
-					p.timer.Stop()
+				if pp.timer != nil {
+					pp.timer.Stop()
 				}
-				p.onDone("", fmt.Errorf("pi rejected prompt: %s", errMsg))
+				p = pp
 			}
 			c.mu.Unlock()
+			// 锁外回调：onDone 可能进入 onProcessError→close 再次拿 c.mu
+			if p != nil {
+				p.onDone("", fmt.Errorf("pi rejected prompt: %s", errMsg))
+			}
 		}
 	}
 }
@@ -269,12 +277,18 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 	// 超时保护
 	if dl, ok := ctx.Deadline(); ok {
 		p.timer = time.AfterFunc(time.Until(dl), func() {
+			// 先取回 + 移除 pending，再锁外调 onDone：
+			// onDone → onProcessError → close() 会再次拿 c.mu，持锁调用会自锁死锁（2026-08 事故根因）
 			c.mu.Lock()
-			if p2, ok2 := c.pending[id]; ok2 {
+			var p2 *pendingPrompt
+			if pp, ok2 := c.pending[id]; ok2 {
 				c.removePendingLocked(id)
-				p2.onDone(strings.TrimSpace(p2.buf.String()), fmt.Errorf("timeout after %s", time.Until(dl).Round(time.Second)*-1))
+				p2 = pp
 			}
 			c.mu.Unlock()
+			if p2 != nil {
+				p2.onDone(strings.TrimSpace(p2.buf.String()), fmt.Errorf("timeout after %s", time.Until(dl).Round(time.Second)*-1))
+			}
 			// 超时后发 abort 让 pi 恢复
 			_ = c.send(map[string]any{"type": "abort"})
 		})
