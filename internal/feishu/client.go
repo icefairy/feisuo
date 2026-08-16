@@ -39,6 +39,7 @@ type Client struct {
 	cfg       Config
 	httpCli   *http.Client
 	token     string
+	tokenExp  time.Time // token 过期时刻（飞书默认 2h）
 	tokenMu   sync.RWMutex
 	streams   map[string]*streamState // openID|session -> 流式状态
 	streamMu  sync.Mutex
@@ -48,10 +49,10 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg, httpCli: &http.Client{Timeout: 30 * time.Second}, streams: make(map[string]*streamState)}
 }
 
-// getAccessToken 获取 tenant_access_token
+// getAccessToken 获取 tenant_access_token（缓存，过期自动重新获取）
 func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 	c.tokenMu.RLock()
-	if c.token != "" {
+	if c.token != "" && time.Now().Before(c.tokenExp) {
 		tok := c.token
 		c.tokenMu.RUnlock()
 		return tok, nil
@@ -60,7 +61,8 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
-	if c.token != "" {
+	// double-check：等锁期间可能已被其他 goroutine 刷新
+	if c.token != "" && time.Now().Before(c.tokenExp) {
 		return c.token, nil
 	}
 
@@ -90,22 +92,31 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("token API: code=%d msg=%s", result.Code, result.Msg)
 	}
 	c.token = result.TenantToken
-	log.Printf("[feishu] token obtained, expire=%ds", result.Expire)
-	go c.refreshToken(ctx)
+	// expire 单位秒；提前 60s 刷新避免边界过期
+	c.tokenExp = time.Now().Add(time.Duration(result.Expire-60) * time.Second)
+	log.Printf("[feishu] token obtained, expire=%ds (refresh at %s)", result.Expire, c.tokenExp.Format("15:04:05"))
 	return c.token, nil
 }
 
-func (c *Client) refreshToken(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Hour)
+// RefreshTokenLoop 周期检查 token 过期并刷新（main 启动时单例调用一次）。
+// 每 10 分钟检查一次；getAccessToken 内部已做过期判断，未过期时零成本。
+func (c *Client) RefreshTokenLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, err := c.getAccessToken(ctx)
-			if err != nil {
-				log.Printf("[feishu] token refresh failed: %v", err)
+			c.tokenMu.RLock()
+			expired := c.token == "" || !time.Now().Before(c.tokenExp)
+			c.tokenMu.RUnlock()
+			if expired {
+				if _, err := c.getAccessToken(ctx); err != nil {
+					log.Printf("[feishu] token refresh failed: %v", err)
+				} else {
+					log.Printf("[feishu] token refreshed")
+				}
 			}
 		}
 	}

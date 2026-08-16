@@ -221,8 +221,9 @@ func main() {
 		log.Printf("[restore] %d persistent session(s) restored", restored)
 	}
 
-	err = fc.Start(ctx, func(ev feishu.Event) {
-		// 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
+	// 飞书 access token 刷新守护（单例，随主 ctx 生命周期）
+	go fc.RefreshTokenLoop(ctx)
+	err = fc.Start(ctx, func(ev feishu.Event) {		// 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
 		if ev.SenderID != "" && !authStore.IsAuthorized(ev.SenderID) {
 			first := authStore.RecordRequest(ev.SenderID)
 			log.Printf("[auth] unauthorized sender %q (first=%v) blocked: %q", ev.SenderID, first, ev.Message.Content)
