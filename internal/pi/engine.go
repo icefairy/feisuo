@@ -134,7 +134,7 @@ func bridgePrompt(sessions []string) string {
 	return b.String()
 }
 
-// sanitizeSessionID 将会话名转成安全的 pi session id（仅 [a-zA-Z0-9-_]）。
+// sanitizeSessionID 将会话名转成安全的 pi session id（仅 [a-zA-Z0-9-_]，且首尾必须是字母/数字）。
 func sanitizeSessionID(name string) string {
 	var b strings.Builder
 	for _, r := range name {
@@ -145,9 +145,9 @@ func sanitizeSessionID(name string) string {
 			b.WriteByte('-')
 		}
 	}
-	s := b.String()
+	s := strings.Trim(b.String(), "-_")
 	if s == "" {
-		return "main"
+		return "dev"
 	}
 	return s
 }
