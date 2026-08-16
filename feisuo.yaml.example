@@ -9,7 +9,7 @@ feishu:
   ws_url: "wss://open.feishu.cn/ws/v1/ws/"
 
 pi:
-  binary: "pi"
+  binary: "pi"        # Linux: "pi"；Windows: "pi.cmd"（代码自动 LookPath 解析）
   provider: "agentrium"
   model: "deepseek-v4-flash"
   base_url: "http://192.168.1.10:3001/v1"
@@ -17,5 +17,5 @@ pi:
   timeout: 300  # 秒
 
 sessions:
-  data_dir: "~/.feisuo/sessions"
+  data_dir: "~/.feisuo/sessions"   # Windows 可写 "C:\\Users\\你\\.feisuo\\sessions"
   default_name: "main"

@@ -18,7 +18,9 @@
 - **会话角色**：每个会话可自定义系统提示词（人设/职责），`/NEW fanyi --role "资深翻译"` 或语义创建
 - **用户认证**：飞书用户白名单制，未授权用户拒绝一切操作并提示授权方式，管理员 CLI 一键批准
 - **本地交互**：终端 `feisuo>` 提示符可直接发任务，命令语法与飞书一致
+- **会话介入（attach）**：`feisuo attach <会话>` 把终端挂到任意会话，实时看收发、可手动输入（tmux/多终端并行介入多会话）
 - **会话状态**：idle / busy / done / error / stopped 五态，`/STATUS` 一览
+- **跨平台**：Linux / Windows 双平台二进制（Windows 用本地 TCP 替代 Unix socket）
 - **零依赖部署**：单二进制 + yaml 配置，supervisor 托管
 
 ## 快速开始
@@ -107,6 +109,7 @@ feisuo list-auth           # 查看已授权 + 待授权申请列表
 | `/LIST` | 列出所有会话（含角色） |
 | `/STATUS` | 查看各会话状态 |
 | `/KILL 分析` | 终止会话（真正杀 pi 进程；下次消息自动复活） |
+| `/RESET 分析` | 重置会话（透传 pi `/new`：清空对话上下文，进程不重启） |
 | `/NAME 旧名 新名` | 重命名会话 |
 | `/HELP` | 查看帮助 |
 | `main: 帮我查资料` | 显式前缀，强制路由到指定会话 |
@@ -133,11 +136,43 @@ $ ./feisuo feisuo.yaml
 飞梭 feisuo 启动
   飞书: 飞梭 | 默认会话: main
   Pi: deepseek-v4-flash @ http://127.0.0.1:3000/v1
-  命令: /TO <会话> <消息> | /NEW <名> | /LIST | /STATUS | /KILL <名>
+  命令: /TO <会话> <消息> | /NEW <名> | /LIST | /STATUS | /KILL <名> | /RESET <名>
   Ctrl+C 退出
 feisuo> /NEW 排障
 feisuo> /TO 排障 看看这个项目的日志报错
 ```
+
+### 介入会话（attach）
+
+`feisuo attach <会话>` 把当前终端挂到指定会话：**实时看到该会话的收发，直接输入即可发送**（输入走 pi 原生 followUp 队列，会话忙时自动排队不打断）。飞书与 attach 操作的是同一个会话，两边实时可见。
+
+```bash
+# 挂到会话 ice
+$ feisuo attach ice
+👤 [ice] 帮我查一下这个 API
+🤖 [ice] 好的，正在查看…
+✅ [ice] 已查完，结论如下：…
+
+# 双通道模式：回复同时发飞书指定用户 + 本地显示
+$ feisuo attach ice --as ou_xxxxxxx
+
+# 退出 attach（不影响会话本体，随时可重新挂）
+$ exit   # 或 Ctrl+C
+```
+
+用 tmux 并行介入多个会话：
+
+```bash
+tmux new -s feisuo
+tmux split-window -h    # 分窗
+tmux split-window -v
+# 每个 pane 里 attach 一个会话
+feisuo attach ice
+feisuo attach work
+feisuo attach main
+```
+
+> **attach 只是监视+输入终端**：退出它只断开连接，pi 进程、消息队列、上下文全部保留。会话只在 `/KILL`（杀进程，上下文保留）或 `/RESET`（清空上下文）时真正终止。
 
 ## 架构
 
@@ -182,3 +217,64 @@ supervisorctl stop feisuo
 cp feisuo /root/.local/bin/feisuo
 supervisorctl start feisuo
 ```
+
+## Windows 部署
+
+飞梭支持 Windows 原生运行（Go 跨平台 + pi 是 Node CLI）。与 Linux 的唯一架构差异：**attach 通道用本地 TCP（127.0.0.1:52821）替代 Unix socket**，其他功能完全一致。
+
+### 1. 编译 Windows 二进制
+
+```bash
+# Linux 上交叉编译
+GOOS=windows GOARCH=amd64 go build -o feisuo.exe .
+# 或 Windows 本机 go build -o feisuo.exe .
+```
+
+### 2. 安装 pi
+
+```powershell
+# 需要 Node.js ≥ 20
+npm i -g @earendil-works/pi-coding-agent
+# 验证：pi --version
+```
+
+### 3. 配置
+
+`feisuo.yaml` 同 Linux，注意 `pi.binary` 填 `pi.cmd`（Windows npm 全局安装生成的命令，代码会自动 LookPath 解析，也可直接写完整路径）：
+
+```yaml
+pi:
+  binary: "pi.cmd"   # 或 C:\\Users\\你\\AppData\\Roaming\\npm\\pi.cmd
+sessions:
+  data_dir: "C:\\Users\\你\\.feisuo\\sessions"   # ~/.feisuo/sessions 也支持
+```
+
+### 4. 运行
+
+```powershell
+# 前台（Ctrl+C 优雅退出）
+feisuo.exe feisuo.yaml
+
+# 介入会话（Windows Terminal 多标签页替代 tmux）
+feisuo.exe attach ice --as ou_xxxxxxx
+```
+
+### 5. 服务托管（NSSM）
+
+把 feisuo 注册为 Windows 服务，开机自启 + 崩溃自动重启：
+
+```powershell
+nssm install feisuo "C:\feisuo\feisuo.exe" "C:\feisuo\feisuo.yaml"
+nssm set feisuo AppDirectory "C:\feisuo"
+nssm set feisuo AppStdout "C:\feisuo\feisuo.log"
+nssm set feisuo AppStderr "C:\feisuo\feisuo.err.log"
+nssm set feisuo Start SERVICE_AUTO_START
+nssm start feisuo
+```
+
+### Windows 注意事项
+
+- **attach 端口固定 52821**：一台机器只跑一个 feisuo 实例；要改端口，编辑 `internal/socket/socket.go` 的 `winTCPAddr` 常量后重新编译
+- **/KILL 杀进程树**：Windows 上用 `taskkill /T /F` 杀掉 pi.cmd 及其 node 子进程，避免僵尸残留
+- **pi 工具链**：pi 执行任务依赖 git/bash 等命令，请安装 [Git for Windows](https://git-scm.com/download/win)（自带 bash）
+- **路径分隔符**：data_dir 用 Windows 格式（`C:\...`）或 `~/...` 均可，代码自动适配
