@@ -193,6 +193,10 @@ func truncate(s string, n int) string {
 
 // Reply 发送带前缀的消息
 func (c *Client) Reply(openID, content string) {
+	if openID == "local" {
+		fmt.Printf("%s\n", content)
+		return
+	}
 	content = fmt.Sprintf("🤖 [%s] %s", c.cfg.BotName, content)
 	if err := c.Send(context.Background(), openID, content); err != nil {
 		log.Printf("[feishu] reply failed: %v", err)
@@ -201,6 +205,10 @@ func (c *Client) Reply(openID, content string) {
 
 // SendChunk 发送流式分块（用于 Pi 执行中的进度）
 func (c *Client) SendChunk(openID, session, chunk string) {
+	if openID == "local" {
+		fmt.Printf("⚡ [%s] %s\n", session, chunk)
+		return
+	}
 	prefix := fmt.Sprintf("⚡ [%s]", session)
 	content := prefix + " " + chunk
 	if len(content) > 1500 {
@@ -238,10 +246,19 @@ type streamState struct {
 	floodStrikes int       // 连续编辑失败次数
 	lastEdit     time.Time // 上次编辑时间
 	fallback     bool      // fallback 模式：停止编辑，等最终结果直接发
+	local        bool      // 命令行介入模式：输出打印到 stdout，不调飞书 API
 }
 
-// StreamBegin 开始流式输出：发送"处理中"消息并记录 message_id
+// StreamBegin 开始流式输出：发送"处理中"消息并记录 message_id。
+// openID=="local"（命令行介入）时直接打印到 stdout，不调飞书 API。
 func (c *Client) StreamBegin(openID, session string) {
+	if openID == "local" {
+		fmt.Printf("\n⚡ [%s] 处理中...\n", session)
+		c.streamMu.Lock()
+		defer c.streamMu.Unlock()
+		c.streams[openID+"|"+session] = &streamState{msgID: "", openID: openID, session: session, lastEdit: time.Now(), local: true}
+		return
+	}
 	key := openID + "|" + session
 	content := fmt.Sprintf("⚡ [%s] 处理中...", session)
 	msgID, err := c.sendAndGetID(openID, content)
@@ -260,6 +277,12 @@ func (c *Client) StreamChunk(openID, session, chunk string) {
 	key := openID + "|" + session
 	c.streamMu.Lock()
 	st := c.streams[key]
+	if st != nil && st.local {
+		// 命令行介入：增量直接打印（无编辑机制）
+		fmt.Print(chunk)
+		c.streamMu.Unlock()
+		return
+	}
 	if st == nil {
 		// 没有活动流：退化到普通分块发送
 		c.streamMu.Unlock()
@@ -352,6 +375,17 @@ func (c *Client) StreamEnd(openID, session, final string, success bool) {
 	key := openID + "|" + session
 	c.streamMu.Lock()
 	st := c.streams[key]
+	if st != nil && st.local {
+		// 命令行介入：打印最终结果并清理
+		delete(c.streams, key)
+		c.streamMu.Unlock()
+		prefix := "✅"
+		if !success {
+			prefix = "❌"
+		}
+		fmt.Printf("\n%s [%s] %s\n", prefix, session, final)
+		return
+	}
 	if st == nil {
 		c.streamMu.Unlock()
 		// 没有活动流：直接发一条结果

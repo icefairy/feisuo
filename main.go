@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"feisuo/internal/pi"
 	"feisuo/internal/protocol"
 	"feisuo/internal/session"
+	"feisuo/internal/socket"
 	"feisuo/internal/store"
 	"time"
 )
@@ -76,11 +78,14 @@ func runAuthCmd(cmd string, args []string) {
 }
 
 func main() {
-	// 子命令模式：feisuo approve <ID> / revoke <ID> / list-auth
+	// 子命令模式：feisuo approve <ID> / revoke <ID> / list-auth / attach <会话> [--as <openid>]
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
 		case "approve", "revoke", "list-auth", "list_pending":
 			runAuthCmd(os.Args[1], os.Args[2:])
+			return
+		case "attach":
+			runAttachCmd(os.Args[2:])
 			return
 		}
 	}
@@ -104,7 +109,29 @@ func main() {
 	authList, pending := authStore.List()
 	log.Printf("[auth] authorized users: %d, pending: %d", len(authList), len(pending))
 
+	// 会话介入通道（Unix socket）：tmux 里 feisuo attach <会话> 可实时看/输入
+	sockPath := filepath.Join(cfg.Sessions.DataDir, "feisuo.sock")
+	sockSrv := socket.NewServer(sockPath)
+	if err := sockSrv.Start(); err != nil {
+		log.Printf("[socket] start failed: %v", err)
+	} else {
+		defer sockSrv.Close()
+	}
+
 	sm := session.New()
+
+	// attach 注入的输入（tmux 介入）：转发到对应会话。
+	// startLoop 定义前先注入占位（只 Enqueue），startLoop 定义后重新注入完整版（含 Reopen+startLoop）。
+	sockSrv.OnInput = func(sessionName, content, sender string) {
+		if sessionName == "" {
+			sessionName = cfg.Sessions.DefaultName
+		}
+		if !sm.Exists(sessionName) {
+			log.Printf("[socket] attach input to non-existent session %q", sessionName)
+			sessionName = cfg.Sessions.DefaultName
+		}
+		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
+	}
 
 	piEng := pi.New(pi.Config{
 		Binary:   cfg.Pi.Binary,
@@ -149,7 +176,23 @@ func main() {
 			return
 		}
 		started[name] = true
-		go startSessionLoop(ctx, name, sm, piEng, fc, s, startLoop)
+		go startSessionLoop(ctx, name, sm, piEng, fc, s, startLoop, sockSrv)
+	}
+
+	// startLoop 定义完成后，注入完整版 OnInput（stopped 会话 Reopen + 重启循环）
+	sockSrv.OnInput = func(sessionName, content, sender string) {
+		if sessionName == "" {
+			sessionName = cfg.Sessions.DefaultName
+		}
+		if !sm.Exists(sessionName) {
+			log.Printf("[socket] attach input to non-existent session %q", sessionName)
+			sessionName = cfg.Sessions.DefaultName
+		}
+		if sm.Reopen(sessionName) {
+			startLoop(sessionName)
+			log.Printf("[socket] session %q reopened via attach", sessionName)
+		}
+		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
 	}
 
 	sm.EnsureDefault(cfg.Sessions.DefaultName)
@@ -207,7 +250,7 @@ func main() {
 }
 
 // startSessionLoop 每个会话的消费循环
-func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string)) {
+func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -234,6 +277,9 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 				sm.SetMessage(name, msg.Content)
 				st.Save(se)
 				log.Printf("[session/%s] processing: %s", name, msg.Content)
+				if sockSrv != nil {
+					sockSrv.Broadcast(fmt.Sprintf("👤 [%s] %s", name, msg.Content))
+				}
 
 				// 通知飞书（流式编辑模式：一条消息内滚动更新）
 				fc.StreamBegin(msg.Sender, name)
@@ -243,6 +289,9 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 						sm.SetMessage(name, chunk)
 						fc.StreamChunk(msg.Sender, name, chunk)
 						st.Save(se)
+						if sockSrv != nil {
+							sockSrv.Broadcast(fmt.Sprintf("🤖 [%s] %s", name, chunk))
+						}
 					},
 					func(final string, err error) {
 						if err != nil {
@@ -250,12 +299,18 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							se.Err = err.Error()
 							sm.SetMessage(name, err.Error())
 							fc.StreamEnd(msg.Sender, name, "失败: "+err.Error(), false)
+							if sockSrv != nil {
+								sockSrv.Broadcast(fmt.Sprintf("❌ [%s] 失败: %s", name, err.Error()))
+							}
 						} else {
 							// 解析 bridge 协作标记：剔除标记后发送给用户，转发内容给目标会话
 							clean, reqs := bridge.Parse(final)
 							sm.SetStatus(name, "done")
 							sm.SetMessage(name, clean)
 							fc.StreamEnd(msg.Sender, name, clean, true)
+							if sockSrv != nil {
+								sockSrv.Broadcast(fmt.Sprintf("✅ [%s] %s", name, clean))
+							}
 
 							// 转发 bridge 请求（防环：Depth > MaxDepth 丢弃；自转发忽略）
 							for _, req := range reqs {
@@ -526,6 +581,84 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 			} else {
 				sm.Enqueue("main", session.Message{Content: line, Sender: "local"})
 			}
+		}
+	}
+}
+
+// runAttachCmd 介入指定会话：实时显示收发 + stdin 输入。
+// 用法: feisuo attach <会话> [--as <飞书用户ID>]
+//  - 不传 --as：本地介入（Sender=local，回复只在本地显示）
+//  - 传 --as <ID>：双通道（回复同时发飞书该用户 + 本地显示）
+func runAttachCmd(args []string) {
+	var sessionName, asOpenID string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--as":
+			if i+1 < len(args) {
+				asOpenID = args[i+1]
+				i++
+			}
+		default:
+			if sessionName == "" {
+				sessionName = args[i]
+			}
+		}
+	}
+	if sessionName == "" {
+		fmt.Println("用法: feisuo attach <会话名> [--as <飞书用户ID>]")
+		os.Exit(1)
+	}
+
+	cfg, err := config.Load(findConfig())
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	sockPath := filepath.Join(cfg.Sessions.DataDir, "feisuo.sock")
+	cli, err := socket.Connect(sockPath)
+	if err != nil {
+		log.Fatalf("attach: %v（feisuo 未运行？socket=%s）", err, sockPath)
+	}
+	defer cli.Close()
+
+	sender := "local"
+	if asOpenID != "" {
+		sender = asOpenID
+	}
+	fmt.Printf("📡 已介入会话 [%s]，输入消息回车发送（Ctrl+C 退出）\n", sessionName)
+	if sender == "local" {
+		fmt.Println("   模式: 仅本地显示（不带 --as，回复不发飞书）")
+	} else {
+		fmt.Println("   模式: 双通道（回复同时发飞书 + 本地显示）")
+	}
+
+	// 异步收广播
+	go func() {
+		for {
+			line, ok := cli.NextEvent()
+			if !ok {
+				fmt.Println("\n（连接已断开）")
+				os.Exit(0)
+			}
+			if line != "" {
+				fmt.Println(line)
+			}
+		}
+	}()
+
+	// stdin 输入
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		text := sc.Text()
+		if text == "" {
+			continue
+		}
+		if text == "exit" || text == "quit" {
+			break
+		}
+		if err := cli.SendInput(sessionName, text, sender); err != nil {
+			fmt.Printf("发送失败: %v\n", err)
+			break
 		}
 	}
 }
