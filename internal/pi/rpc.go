@@ -21,6 +21,7 @@ type rpcClient struct {
 
 	mu       sync.Mutex
 	pending  map[string]*pendingPrompt // id -> 进行中的 prompt
+	pendingOrder []string              // FIFO：插入顺序，agent_settled 只完成最早一个
 	closed   bool
 	shutdown chan struct{}
 	lastErr  string
@@ -119,10 +120,14 @@ func startRPC(ctx context.Context, cfg Config) (*rpcClient, error) {
 			errStr = "pi rpc process exited"
 		}
 		pend := c.pending
+		pendOrder := c.pendingOrder
 		c.pending = map[string]*pendingPrompt{}
+		c.pendingOrder = nil
 		c.mu.Unlock()
-		for _, p := range pend {
-			p.onDone(strings.TrimSpace(p.buf.String()), fmt.Errorf("%s", errStr))
+		for _, id := range pendOrder {
+			if p, ok := pend[id]; ok {
+				p.onDone(strings.TrimSpace(p.buf.String()), fmt.Errorf("%s", errStr))
+			}
 		}
 	}()
 
@@ -166,30 +171,43 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 		if dt == "text_delta" {
 			delta, _ := ame["delta"].(string)
 			c.mu.Lock()
-			// 把 delta 分发给所有 pending（当前只有一个在跑，但保险起见全发）
-			for _, p := range c.pending {
-				p.buf.WriteString(delta)
-				if p.onChunk != nil {
-					p.onChunk(delta)
+			// 只发给最早 pending（当前正在跑的 prompt；followUp 排队的后序 prompt 还没开始）
+			if len(c.pendingOrder) > 0 {
+				first := c.pendingOrder[0]
+				if p, ok := c.pending[first]; ok {
+					p.buf.WriteString(delta)
+					if p.onChunk != nil {
+						p.onChunk(delta)
+					}
 				}
 			}
 			c.mu.Unlock()
 		}
 
 	case "agent_settled":
+		// pi 的 agent_settled 不带 prompt id，且 followUp 队列 FIFO：
+		// 每次 settled 只代表**最早**那个 prompt 完成（后续排队的还没跑）。
+		// 只完成第一个，不能清空全部（否则排队的 prompt 会被错误地空结果 onDone）。
 		c.mu.Lock()
-		pend := c.pending
-		c.pending = map[string]*pendingPrompt{}
+		var doneID string
+		var done *pendingPrompt
+		if len(c.pendingOrder) > 0 {
+			doneID = c.pendingOrder[0]
+			done = c.pending[doneID]
+			c.pendingOrder = c.pendingOrder[1:]
+			delete(c.pending, doneID)
+		}
 		c.mu.Unlock()
-		for _, p := range pend {
-			if p.timer != nil {
-				p.timer.Stop()
+		if done != nil {
+			if done.timer != nil {
+				done.timer.Stop()
 			}
-			final := strings.TrimSpace(p.buf.String())
+			final := strings.TrimSpace(done.buf.String())
 			if final == "" {
 				final = "（Pi 返回为空）"
 			}
-			p.onDone(final, nil)
+			log.Printf("[pi-rpc] settled id=%s len=%d queue=%d", doneID, len(final), len(c.pendingOrder))
+			done.onDone(final, nil)
 		}
 
 	case "response":
@@ -200,7 +218,7 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 			errMsg, _ := ev["error"].(string)
 			c.mu.Lock()
 			if p, ok := c.pending[id]; ok {
-				delete(c.pending, id)
+				c.removePendingLocked(id)
 				if p.timer != nil {
 					p.timer.Stop()
 				}
@@ -211,7 +229,19 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 	}
 }
 
-// prompt 向常驻进程发送一个 prompt，等待完成。
+// removePendingLocked 从 pending map 和 FIFO order 中移除 id。调用方必须持有 c.mu。
+func (c *rpcClient) removePendingLocked(id string) {
+	delete(c.pending, id)
+	for i, v := range c.pendingOrder {
+		if v == id {
+			c.pendingOrder = append(c.pendingOrder[:i], c.pendingOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+// prompt 发送 prompt 给 pi。使用 streamingBehavior=followUp 让 pi 原生排队：
+// agent 忙时自动排队，完成后依次处理（不用 feisuo 自己串行）。
 func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(string), onDone func(string, error)) {
 	c.mu.Lock()
 	if c.closed {
@@ -221,6 +251,7 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 	}
 	p := &pendingPrompt{onChunk: onChunk, onDone: onDone}
 	c.pending[id] = p
+	c.pendingOrder = append(c.pendingOrder, id)
 	c.mu.Unlock()
 
 	// 超时保护
@@ -228,7 +259,7 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 		p.timer = time.AfterFunc(time.Until(dl), func() {
 			c.mu.Lock()
 			if p2, ok2 := c.pending[id]; ok2 {
-				delete(c.pending, id)
+				c.removePendingLocked(id)
 				p2.onDone(strings.TrimSpace(p2.buf.String()), fmt.Errorf("timeout after %s", time.Until(dl).Round(time.Second)*-1))
 			}
 			c.mu.Unlock()
@@ -237,10 +268,17 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 		})
 	}
 
-	cmd := map[string]any{"id": id, "type": "prompt", "message": msg}
+	cmd := map[string]any{
+		"id":   id,
+		"type": "prompt",
+		"message": msg,
+		// 使用 pi 原生排队：当前 agent 忙时 followUp 会排队，等完成后自动处理下一条。
+		// 不自己串行（doneCh），避免与 pi 的队列机制冲突/重复实现。
+		"streamingBehavior": "followUp",
+	}
 	if err := c.send(cmd); err != nil {
 		c.mu.Lock()
-		delete(c.pending, id)
+		c.removePendingLocked(id)
 		c.mu.Unlock()
 		if p.timer != nil {
 			p.timer.Stop()
