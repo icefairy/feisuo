@@ -206,7 +206,9 @@ func main() {
 			startLoop(sessionName)
 			log.Printf("[socket] session %q reopened via attach", sessionName)
 		}
-		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
+		if !sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender}) {
+			log.Printf("[socket] session %q queue full, message dropped", sessionName)
+		}
 	}
 
 	sm.EnsureDefault(cfg.Sessions.DefaultName)
@@ -398,7 +400,9 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 		startLoop(target)
 		log.Printf("[dispatch] session %q reopened", target)
 	}
-	sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender})
+	if !sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender}) {
+		fc.Reply(sender, fmt.Sprintf("⚠️ 会话 `%s` 队列已满，消息被丢弃", target))
+	}
 }
 
 func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,

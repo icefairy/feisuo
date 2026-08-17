@@ -33,7 +33,7 @@ func NewSession(name string) *Session {
 	return &Session{
 		Name:      name,
 		Status:    "idle",
-		Queue:     make(chan Message, 10),
+		Queue:     make(chan Message, 100), // 增大队列容量，防止排队满丢消息
 		StartedAt: time.Now(),
 	}
 }
