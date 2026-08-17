@@ -25,6 +25,7 @@ type Session struct {
 	StoppedAt  *time.Time
 	Err        string
 	SystemPrompt string // 会话角色/系统提示词（可空）
+	LastSender string // 最后活跃的飞书用户（attach 介入时用此 ID 发送回复）
 	mu         sync.Mutex
 }
 
@@ -140,6 +141,10 @@ func (m *Manager) Enqueue(name string, msg Message) bool {
 		s.mu.Unlock()
 		return false
 	}
+	// 记录最后活跃的飞书用户（local 介入不更新，保持原飞书用户 ID）
+	if msg.Sender != "" && msg.Sender != "local" {
+		s.LastSender = msg.Sender
+	}
 	s.mu.Unlock()
 
 	select {
@@ -246,6 +251,32 @@ func (m *Manager) List() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// SetLastSender 记录会话最后活跃的飞书用户（消息入队时更新）。
+func (m *Manager) SetLastSender(name, sender string) {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastSender = sender
+}
+
+// GetLastSender 返回会话最后活跃的飞书用户；无则返回空。
+func (m *Manager) GetLastSender(name string) string {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastSender
 }
 
 func (m *Manager) FormatStatus() string {

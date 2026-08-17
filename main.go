@@ -296,13 +296,21 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 					sockSrv.Broadcast(fmt.Sprintf("👤 [%s] %s", name, msg.Content))
 				}
 
+				// 确定飞书发送目标：attach 介入(local)时用最后活跃的飞书用户
+				feishuTarget := msg.Sender
+				if msg.Sender == "local" {
+					if last := sm.GetLastSender(name); last != "" {
+						feishuTarget = last
+					}
+				}
+
 				// 通知飞书（流式编辑模式：一条消息内滚动更新）
-				fc.StreamBegin(msg.Sender, name)
+				fc.StreamBegin(feishuTarget, name)
 
 				piEng.Execute(ctx, name, msg.Content,
 					func(chunk string) {
 						sm.SetMessage(name, chunk)
-						fc.StreamChunk(msg.Sender, name, chunk)
+						fc.StreamChunk(feishuTarget, name, chunk)
 						st.Save(se)
 						if sockSrv != nil {
 							sockSrv.Broadcast(fmt.Sprintf("🤖 [%s] %s", name, chunk))
@@ -313,7 +321,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							sm.SetStatus(name, "error")
 							se.Err = err.Error()
 							sm.SetMessage(name, err.Error())
-							fc.StreamEnd(msg.Sender, name, "失败: "+err.Error(), false)
+							fc.StreamEnd(feishuTarget, name, "失败: "+err.Error(), false)
 							if sockSrv != nil {
 								sockSrv.Broadcast(fmt.Sprintf("❌ [%s] 失败: %s", name, err.Error()))
 							}
@@ -322,7 +330,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							clean, reqs := bridge.Parse(final)
 							sm.SetStatus(name, "done")
 							sm.SetMessage(name, clean)
-							fc.StreamEnd(msg.Sender, name, clean, true)
+							fc.StreamEnd(feishuTarget, name, clean, true)
 							if sockSrv != nil {
 								sockSrv.Broadcast(fmt.Sprintf("✅ [%s] %s", name, clean))
 							}
@@ -331,17 +339,17 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 							for _, req := range reqs {
 								if req.Target == name {
 									log.Printf("[bridge] self-forward %q -> %q ignored", name, req.Target)
-									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 会话 `%s` 不能转发给自己，请直接处理或指定其他会话", name))
+									fc.Reply(feishuTarget, fmt.Sprintf("⚠️ 会话 `%s` 不能转发给自己，请直接处理或指定其他会话", name))
 									continue
 								}
 								if msg.Depth+1 > bridge.MaxDepth {
 									log.Printf("[bridge] depth %d > max %d, drop %q -> %q (loop guard)", msg.Depth+1, bridge.MaxDepth, name, req.Target)
-									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 转发链过深（>%d 层），已停止 `%s` 的转发请求", bridge.MaxDepth, req.Target))
+									fc.Reply(feishuTarget, fmt.Sprintf("⚠️ 转发链过深（>%d 层），已停止 `%s` 的转发请求", bridge.MaxDepth, req.Target))
 									continue
 								}
 								if !sm.Exists(req.Target) {
 									log.Printf("[bridge] target %q not exists, drop", req.Target)
-									fc.Reply(msg.Sender, fmt.Sprintf("⚠️ 会话 `%s` 不存在，无法转发", req.Target))
+									fc.Reply(feishuTarget, fmt.Sprintf("⚠️ 会话 `%s` 不存在，无法转发", req.Target))
 									continue
 								}
 								log.Printf("[bridge] %s -> %s: %s", name, req.Target, req.Content)
