@@ -78,19 +78,42 @@ func runAuthCmd(cmd string, args []string) {
 }
 
 func main() {
+	// 参数扫描：-h/--help/-c，然后用剩余参数判断子命令
+	var configPath string
+	var remaining []string
+	for i := 1; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "-h", "--help":
+			printUsage()
+			return
+		case "-c":
+			if i+1 < len(os.Args) {
+				configPath = os.Args[i+1]
+				i++
+			} else {
+				log.Fatal("-c 需要指定配置文件路径")
+			}
+		default:
+			remaining = append(remaining, os.Args[i])
+		}
+	}
+
 	// 子命令模式：feisuo approve <ID> / revoke <ID> / list-auth / attach <会话> [--as <openid>]
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
+	if len(remaining) >= 1 {
+		switch remaining[0] {
 		case "approve", "revoke", "list-auth", "list_pending":
-			runAuthCmd(os.Args[1], os.Args[2:])
+			runAuthCmd(remaining[0], remaining[1:])
 			return
 		case "attach":
-			runAttachCmd(os.Args[2:])
+			runAttachCmd(remaining[1:])
 			return
 		}
 	}
 
-	cfg, err := config.Load(findConfig())
+	if configPath == "" {
+		configPath = findConfig()
+	}
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
@@ -642,13 +665,55 @@ func runAttachCmd(args []string) {
 }
 
 func findConfig() string {
-	if _, err := os.Stat("feisuo.yaml"); err == nil {
-		return "feisuo.yaml"
+	// 按优先级搜索配置文件：当前目录 → 系统路径 → 用户目录
+	paths := []string{
+		"feisuo.yaml",
+		"/etc/feisuo/feisuo.yaml",
+		filepath.Join(mustHomeDir(), ".feisuo", "feisuo.yaml"),
 	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "feisuo.yaml" // 找不到时返回默认（会报错）
+}
+
+func mustHomeDir() string {
 	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".feisuo", "feisuo.yaml")
-	if _, err := os.Stat(path); err == nil {
-		return path
+	if home == "" {
+		return "."
 	}
-	return "feisuo.yaml"
+	return home
+}
+
+func printUsage() {
+	fmt.Println(`飞梭 (feisuo) — 飞书 AI Agent 网关
+
+用法:
+  feisuo [-c <配置文件>]
+  feisuo -h | --help
+  feisuo <子命令> [参数]
+
+选项:
+  -c <文件>    指定配置文件路径（默认：当前目录 feisuo.yaml → ~/.feisuo/feisuo.yaml）
+  -h, --help   显示帮助信息
+
+子命令:
+  approve <用户ID>       批准飞书用户授权
+  revoke <用户ID>        撤销飞书用户授权
+  list-auth              列出已授权用户
+  list_pending           列出待授权用户
+  attach <会话> [--as <openid>]  实时介入会话（本地终端）
+
+配置文件搜索顺序:
+  1. -c 参数指定的路径
+  2. 当前目录 ./feisuo.yaml
+  3. ~/.feisuo/feisuo.yaml
+
+示例:
+  feisuo                                    # 使用默认配置启动
+  feisuo -c /etc/feisuo/feisuo.yaml         # 指定配置文件
+  feisuo approve ou_xxxxx                    # 批准用户授权
+  feisuo attach main                        # 介入 main 会话`)
 }
