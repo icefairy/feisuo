@@ -276,7 +276,13 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 
 	// 超时保护
 	if dl, ok := ctx.Deadline(); ok {
-		p.timer = time.AfterFunc(time.Until(dl), func() {
+		// 缓存剩余时间：timer 触发时 time.Until(dl)≈0，直接取会导致错误信息误导显示 "0s"
+		dur := time.Until(dl)
+		if dur <= 0 {
+			// deadline 已过（排队太久）：给最小保护期，避免 AfterFunc(0) 立即触发
+			dur = 30 * time.Second
+		}
+		p.timer = time.AfterFunc(dur, func() {
 			// 先取回 + 移除 pending，再锁外调 onDone：
 			// onDone → onProcessError → close() 会再次拿 c.mu，持锁调用会自锁死锁（2026-08 事故根因）
 			c.mu.Lock()
@@ -287,7 +293,7 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 			}
 			c.mu.Unlock()
 			if p2 != nil {
-				p2.onDone(strings.TrimSpace(p2.buf.String()), fmt.Errorf("timeout after %s", time.Until(dl).Round(time.Second)*-1))
+				p2.onDone(strings.TrimSpace(p2.buf.String()), fmt.Errorf("timeout after %s", dur.Round(time.Second)))
 			}
 			// 超时后发 abort 让 pi 恢复
 			_ = c.send(map[string]any{"type": "abort"})

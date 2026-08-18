@@ -61,7 +61,7 @@ func applyDefaults(c *Config) {
 		c.Pi.Provider = "openai"
 	}
 	if c.Pi.Timeout == 0 {
-		c.Pi.Timeout = 300
+		c.Pi.Timeout = 1800 // 默认 30 分钟：开发任务需要读代码+写代码+测试，300s 经常不够
 	}
 	if c.Sessions.DataDir == "" {
 		c.Sessions.DataDir = "~/.feisuo/sessions"

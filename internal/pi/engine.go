@@ -59,7 +59,7 @@ func (e *Engine) Execute(ctx context.Context, session, prompt string,
 
 	timeout := e.cfg.Timeout
 	if timeout == 0 {
-		timeout = 300
+		timeout = 1800 // 默认 30 分钟（与 config 默认一致，应对开发任务）
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
