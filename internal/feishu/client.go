@@ -318,6 +318,7 @@ type streamState struct {
 	openID       string    // 接收者 open_id（roll 新消息用，不能拿 session 名当 open_id！）
 	session      string
 	full         string    // 累积的完整文本（每次编辑发全文，保证前面的内容不丢）
+	sentLen      int       // 已发到飞书的 full 的 rune 长度（roll 新消息时只发增量，避免重复）
 	buf          string    // 待 flush 的增量（防抖用）
 	dirty        bool
 	timer        *time.Timer
@@ -416,6 +417,16 @@ func (st *streamState) effectiveInterval() time.Duration {
 	return st.editInterval
 }
 
+// rollIncrement 返回自上次 roll（sentLen rune 位置）起的增量文本。
+// roll 新消息只发增量，避免长任务时同一内容在多张卡片重复（Hermes 同策略）。
+func rollIncrement(full string, sentLen int) string {
+	runes := []rune(full)
+	if sentLen >= len(runes) {
+		return ""
+	}
+	return string(runes[sentLen:])
+}
+
 // rollToNewMessageLocked 编辑预算耗尽：当前消息 finalize（不再编辑），
 // 开一条新消息记录后续增量，后续编辑指向新消息。调用方必须持有 streamMu。
 func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
@@ -433,8 +444,13 @@ func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
 			log.Printf("[feishu] roll finalize edit failed: %v", err)
 		}
 	}()
-	// 开新消息：从当前全文继续（新消息获得新的 20 次编辑预算）
-	newID, err := c.sendAndGetID(st.openID, cur)
+	// 开新消息：只发自上次 roll 起的【增量】（rollIncrement），
+	// 不再重发已展示过的全文——避免长任务时同一内容在多张卡片重复。
+	// 用户如需完整上下文，往上翻看已 finalize 的旧卡片即可（Hermes 同策略）。
+	inc := rollIncrement(st.full, st.sentLen)
+	st.sentLen = len([]rune(st.full))
+	newContent := prefix + inc
+	newID, err := c.sendAndGetID(st.openID, newContent)
 	if err != nil {
 		// 新消息失败：进入 fallback，等最终结果直接发
 		log.Printf("[feishu] roll new message failed, fallback: %v", err)
