@@ -549,17 +549,23 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			return
 		}
 		fc.Reply(sender, fmt.Sprintf("🗜 正在压缩会话 `%s` 的上下文…", name))
+		// compact 结果是一次性总结，不流式编辑（避免 roll 裂成多卡"蹦字"）。
+		// onChunk 只累积，onDone 一次性发完整总结。
+		var compactBuf strings.Builder
 		piEng.Execute(ctx, name, "/compact",
 			func(chunk string) {
-				// 流式进度：实时推送到飞书卡片（与正常对话同路径）
-				fc.StreamChunk(sender, name, chunk)
+				compactBuf.WriteString(chunk)
 			},
 			func(final string, err error) {
 				if err != nil {
 					fc.Reply(sender, fmt.Sprintf("❌ 压缩会话 `%s` 失败: %v", name, err))
 					return
 				}
-				fc.Reply(sender, fmt.Sprintf("✅ 会话 `%s` 上下文已压缩\n\n%s", name, final))
+				result := strings.TrimSpace(final)
+				if result == "" {
+					result = strings.TrimSpace(compactBuf.String())
+				}
+				fc.Reply(sender, fmt.Sprintf("✅ 会话 `%s` 上下文已压缩\n\n%s", name, result))
 			})
 		return
 
