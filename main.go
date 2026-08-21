@@ -156,13 +156,18 @@ func main() {
 		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
 	}
 
+	// pi 超时：nil→默认 1800，显式 0→不超时（空闲等待用户时不被 30 分钟 timer 误中断）
+	piTimeout := 0
+	if cfg.Pi.Timeout != nil {
+		piTimeout = *cfg.Pi.Timeout
+	}
 	piEng := pi.New(pi.Config{
 		Binary:   cfg.Pi.Binary,
 		Provider: cfg.Pi.Provider,
 		Model:    cfg.Pi.Model,
 		BaseURL:  cfg.Pi.BaseURL,
 		APIKey:   cfg.Pi.APIKey,
-		Timeout:  cfg.Pi.Timeout,
+		Timeout:  piTimeout,
 	})
 	// 注入会话列表提供者：pi 启动时生成 bridge 协作协议（可转发给哪些会话）
 	piEng.SessionList = func() []string { return sm.List() }
@@ -532,6 +537,32 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		}
 		fc.Reply(sender, fmt.Sprintf("🔄 已重置会话 `%s`（对话上下文已清空，历史无法恢复）", name))
 
+	case "compact":
+		// /COMPACT <会话> → 透传 pi 原生 /compact：压缩当前会话上下文（保留关键信息，降 token 占用）
+		name := cmd.Arg
+		if name == "" {
+			fc.Reply(sender, "❌ /COMPACT <会话> — 请指定会话名")
+			return
+		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
+			return
+		}
+		fc.Reply(sender, fmt.Sprintf("🗜 正在压缩会话 `%s` 的上下文…", name))
+		piEng.Execute(ctx, name, "/compact",
+			func(chunk string) {
+				// 流式进度：实时推送到飞书卡片（与正常对话同路径）
+				fc.StreamChunk(sender, name, chunk)
+			},
+			func(final string, err error) {
+				if err != nil {
+					fc.Reply(sender, fmt.Sprintf("❌ 压缩会话 `%s` 失败: %v", name, err))
+					return
+				}
+				fc.Reply(sender, fmt.Sprintf("✅ 会话 `%s` 上下文已压缩\n\n%s", name, final))
+			})
+		return
+
 	case "name", "rename":
 		parts := protocol.SplitTwo(cmd.Arg)
 		if parts[0] == "" || parts[1] == "" {
@@ -550,6 +581,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /STATUS             查看会话状态
   /KILL <会话>        终止会话（上下文保留，复活后恢复）
   /RESET <会话>       重置会话（透传 pi /new：清空对话上下文）
+  /COMPACT <会话>     压缩会话上下文（透传 pi /compact：保留关键信息降 token）
   /NAME <旧> <新>     重命名会话
   普通消息            发给当前会话（/TO 切换后发往新会话）`)
 

@@ -57,12 +57,16 @@ func New(cfg Config) *Engine {
 func (e *Engine) Execute(ctx context.Context, session, prompt string,
 	onChunk func(string), onDone func(string, error)) {
 
+	// 超时仅当配置了正数才启用；timeout<=0 表示不设超时（无限等待）。
+	// 背景：pi 完成回复后若处于等待用户输入（空闲）状态、未发 agent_settled，
+	// 固定 30 分钟 timer 会在用户空闲时误触发“timeout”中断。禁用后空闲不再超时，
+	// 防卡死交给显式配置或 /KILL /RESET 干预。
 	timeout := e.cfg.Timeout
-	if timeout == 0 {
-		timeout = 1800 // 默认 30 分钟（与 config 默认一致，应对开发任务）
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
 
 	c := e.getClient(session)
 	if c == nil {

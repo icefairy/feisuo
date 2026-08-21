@@ -26,7 +26,7 @@ type PiConfig struct {
 	Model   string `yaml:"model"`
 	BaseURL string `yaml:"base_url"`
 	APIKey  string `yaml:"api_key"`
-	Timeout int    `yaml:"timeout"` // seconds
+	Timeout *int   `yaml:"timeout"` // seconds；nil=默认 1800，显式 0=不超时（空闲等待不中断）
 }
 
 type SessionConfig struct {
@@ -60,8 +60,10 @@ func applyDefaults(c *Config) {
 	if c.Pi.Provider == "" {
 		c.Pi.Provider = "openai"
 	}
-	if c.Pi.Timeout == 0 {
-		c.Pi.Timeout = 1800 // 默认 30 分钟：开发任务需要读代码+写代码+测试，300s 经常不够
+	// 未配置时给默认 1800（防卡死兑底）；显式 timeout: 0 保留为 0（不超时，空闲等待不中断）
+	if c.Pi.Timeout == nil {
+		def := 1800
+		c.Pi.Timeout = &def
 	}
 	if c.Sessions.DataDir == "" {
 		c.Sessions.DataDir = "~/.feisuo/sessions"
