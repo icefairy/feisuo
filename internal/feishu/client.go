@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +20,12 @@ import (
 )
 
 type Config struct {
-	AppID     string
-	AppSecret string
-	BotName   string
-	WsURL     string
+	AppID           string
+	AppSecret       string
+	BotName         string
+	WsURL           string
+	WSHealthTimeout time.Duration // WS 健康检查阈值；0=禁用
+	Shutdown        func()        // 触发进程优雅退出（main 注入 cancel），用于 WS 僵死自愈
 }
 
 // 包级 URL 变量：生产用默认飞书端点，测试可注入 mock server
@@ -50,10 +53,22 @@ type Client struct {
 	tokenMu   sync.RWMutex
 	streams   map[string]*streamState // openID|session -> 流式状态
 	streamMu  sync.Mutex
+
+	// WS 健康检查（应用层 alive 探测，根治 WS 半开僵死）
+	wsAliveMu   sync.Mutex
+	wsLastEvent time.Time
+	wsDeadline  time.Duration
+	shutdown    func()
 }
 
 func New(cfg Config) *Client {
-	return &Client{cfg: cfg, httpCli: &http.Client{Timeout: 30 * time.Second}, streams: make(map[string]*streamState)}
+	return &Client{
+		cfg:        cfg,
+		httpCli:    &http.Client{Timeout: 30 * time.Second},
+		streams:    make(map[string]*streamState),
+		wsDeadline: cfg.WSHealthTimeout,
+		shutdown:   cfg.Shutdown,
+	}
 }
 
 // SetBaseURL 覆盖飞书端点（测试注入 mock server 用）
@@ -273,6 +288,7 @@ func truncate(s string, n int) string {
 
 // Reply 发送带前缀的消息
 func (c *Client) Reply(openID, content string) {
+	c.markAlive()
 	if openID == "local" {
 		fmt.Printf("%s\n", content)
 		return
@@ -307,7 +323,8 @@ func (c *Client) SendChunk(openID, session, chunk string) {
 //   - 完成时编辑最终完整答案
 
 const (
-	maxEditsPerMessage = 15 // 单条消息编辑预算（留余量给 20 次上限）
+	maxEditsPerMessage = 15  // 单条消息编辑预算（留余量给 20 次上限）
+	maxMsgRunes        = 2000 // 单条消息展示上限（字，cjk rune 数），超了拆条
 	streamEditInterval = 1500 * time.Millisecond
 	maxEditBackoff     = 10 * time.Second
 	maxFloodStrikes    = 3
@@ -333,6 +350,7 @@ type streamState struct {
 // StreamBegin 开始流式输出：发送"处理中"消息并记录 message_id。
 // openID=="local"（命令行介入）时直接打印到 stdout，不调飞书 API。
 func (c *Client) StreamBegin(openID, session string) {
+	c.markAlive()
 	if openID == "local" {
 		fmt.Printf("\n⚡ [%s] 处理中...\n", session)
 		c.streamMu.Lock()
@@ -355,6 +373,7 @@ func (c *Client) StreamBegin(openID, session string) {
 // StreamChunk 累积增量，按编辑间隔/字符阈值编辑同一消息；
 // 本条消息编辑预算耗尽时 finalize 并开新消息继续
 func (c *Client) StreamChunk(openID, session, chunk string) {
+	c.markAlive()
 	key := openID + "|" + session
 	c.streamMu.Lock()
 	st := c.streams[key]
@@ -387,6 +406,14 @@ func (c *Client) StreamChunk(openID, session, chunk string) {
 		c.streamMu.Unlock()
 		return
 	}
+	// 超长触发：单条消息已到展示上限，且自上次 roll 起增量又累计到一卡（≥ maxMsgRunes），
+	// 拆条新开消息避免单条过长。仅用「增量长度」触发会刚 roll 完立刻又拆（incLen≈0 的连续空卡），
+	// 故叠加 st.full 总长条件：full 未到上限前不拆，增量累积满一卡才再拆。
+	if shouldRollByLength(st.full, st.sentLen) {
+		c.rollToNewMessageLocked(st, key)
+		c.streamMu.Unlock()
+		return
+	}
 	// 距上次编辑 ≥ editInterval（自适应）或 累积 ≥ 1200 字符：立即 flush
 	if st.timer == nil {
 		interval := st.editInterval
@@ -415,6 +442,16 @@ func (st *streamState) effectiveInterval() time.Duration {
 		return streamEditInterval
 	}
 	return st.editInterval
+}
+
+// shouldRollByLength 判断是否需要因内容超长而拆条。
+// 双条件：full 总长 ≥ maxMsgRunes（单条已达展示上限）且自上次 roll 的增量又累计 ≥ maxMsgRunes
+// （新一卡的内容足够）。仅用增量触发会刚 roll 完立刻又拆（incLen≈0 时 continuous 空卡），
+// 叠加 full 总长条件保证：full 未到上限前不拆，增量累积满一卡才再拆。
+func shouldRollByLength(full string, sentLen int) bool {
+	fullLen := len([]rune(full))
+	incLen := fullLen - sentLen
+	return fullLen >= maxMsgRunes && incLen >= maxMsgRunes
 }
 
 // rollIncrement 返回自上次 roll（sentLen rune 位置）起的增量文本。
@@ -468,6 +505,7 @@ func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
 
 // StreamEnd 结束流式：编辑为最终结果（成功/失败），并清理状态
 func (c *Client) StreamEnd(openID, session, final string, success bool) {
+	c.markAlive()
 	key := openID + "|" + session
 	c.streamMu.Lock()
 	st := c.streams[key]
@@ -748,6 +786,7 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 			}
 		}
 		log.Printf("[feishu] msg received, sender=%s content=%s", senderID, content)
+		c.markAlive()
 		handler(Event{Type: "message", SenderID: senderID, Message: Message{Content: content}})
 		return nil
 	})
@@ -758,12 +797,14 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 	)
 	cli.SetOnReady(func() {
 		log.Printf("[feishu] WebSocket connected (long connection)")
+		c.markAlive()
 	})
 	cli.SetOnReconnecting(func() {
 		log.Printf("[feishu] WebSocket reconnecting...")
 	})
 	cli.SetOnReconnected(func() {
 		log.Printf("[feishu] WebSocket reconnected (long connection)")
+		c.markAlive()
 	})
 	cli.SetOnDisconnected(func() {
 		log.Printf("[feishu] WebSocket disconnected, will reconnect")
@@ -778,6 +819,9 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 		}
 	}()
 
+	// 启动 WS 健康检查看门狗（应用层 alive 探测，根治 WS 半开僵死）
+	go c.wsWatchdog(ctx)
+
 	// 简单探测：等 3 秒看是否连接成功（OnReady 会打印日志）
 	select {
 	case <-ctx.Done():
@@ -785,4 +829,56 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 	case <-time.After(3 * time.Second):
 	}
 	return nil
+}
+
+// --- WS 健康检查：应用层 alive 探测，根治 WS 半开僵死 ---
+
+// markAlive 记录最近一次收到飞书事件（消息 / 连接就绪 / 重连成功）的时间。
+func (c *Client) markAlive() {
+	c.wsAliveMu.Lock()
+	c.wsLastEvent = time.Now()
+	c.wsAliveMu.Unlock()
+}
+
+// lastEventAge 距最近一次飞书事件的时长。
+func (c *Client) lastEventAge() time.Duration {
+	c.wsAliveMu.Lock()
+	defer c.wsAliveMu.Unlock()
+	return time.Since(c.wsLastEvent)
+}
+
+// wsIsDead 判断 WS 是否疑似僵死：超过阈值未见任何事件。
+func (c *Client) wsIsDead() bool {
+	if c.wsDeadline <= 0 {
+		return false
+	}
+	return c.lastEventAge() > c.wsDeadline
+}
+
+// wsWatchdog 定时检查 WS 活性；疑似僵死则触发进程优雅退出，
+// 由 supervisor 自动重启重建 WS（等价于手动 kill -QUIT 的自愈，但自动化、内建于二进制）。
+func (c *Client) wsWatchdog(ctx context.Context) {
+	if c.wsDeadline <= 0 {
+		return
+	}
+	c.markAlive() // 初始化，避免启动前误触发
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if c.wsIsDead() {
+				log.Printf("[feishu] WS 健康检查失败：已 %v 未收到任何飞书事件（阈值 %v），触发进程优雅退出以重建连接",
+					c.lastEventAge().Round(time.Second), c.wsDeadline.Round(time.Second))
+				if c.shutdown != nil {
+					c.shutdown()
+				} else {
+					os.Exit(0)
+				}
+				return
+			}
+		}
+	}
 }

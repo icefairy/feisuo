@@ -14,10 +14,11 @@ type Config struct {
 }
 
 type FeishuConfig struct {
-	AppID     string `yaml:"app_id"`
-	AppSecret string `yaml:"app_secret"`
-	BotName   string `yaml:"bot_name"`
-	WsURL     string `yaml:"ws_url"`
+	AppID           string `yaml:"app_id"`
+	AppSecret       string `yaml:"app_secret"`
+	BotName         string `yaml:"bot_name"`
+	WsURL           string `yaml:"ws_url"`
+	WSHealthTimeout int    `yaml:"ws_health_timeout"` // 秒；0 或不配置 = 默认 600，WS 僵死自愈阈值
 }
 
 type PiConfig struct {
@@ -53,6 +54,9 @@ func Load(path string) (Config, error) {
 func applyDefaults(c *Config) {
 	if c.Feishu.WsURL == "" {
 		c.Feishu.WsURL = "wss://open.feishu.cn/ws/v1/ws/"
+	}
+	if c.Feishu.WSHealthTimeout <= 0 {
+		c.Feishu.WSHealthTimeout = 600
 	}
 	if c.Pi.Binary == "" {
 		c.Pi.Binary = "pi"

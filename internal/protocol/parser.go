@@ -49,7 +49,7 @@ func (p *Parser) Parse(text string) Command {
 		arg = sParts[1]
 		return Command{Type: CmdCommand, Cmd: cmd, Arg: arg, Session: session}
 
-	case "new", "list", "ls", "status", "kill", "reset", "compact", "name", "rename", "help", "role":
+	case "new", "list", "ls", "status", "kill", "reset", "stop", "compact", "name", "rename", "help", "role":
 		// 提取 --role "..."（NEW/ROLE 命令）
 		role := ""
 		arg = extractRole(arg, &role)

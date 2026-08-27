@@ -6,10 +6,10 @@ func TestSanitizeSessionID(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"main", "main"},
 		{"ice", "ice"},
-		{"我的会话", "----"}, // 非 ASCII 全转 -（4 个字符）
+		{"我的会话", "dev"}, // 非 ASCII 全转 -→ Trim 为空→回退 dev
 		{"work-2", "work-2"},
 		{"a_b", "a_b"},
-		{"", "main"}, // 空回退
+		{"", "dev"}, // 空回退 dev
 	}
 	for _, c := range cases {
 		got := sanitizeSessionID(c.in)
@@ -25,5 +25,16 @@ func TestSessionIDPrefix(t *testing.T) {
 	want := "feisuo-ice"
 	if got != want {
 		t.Errorf("session id = %q, want %q", got, want)
+	}
+}
+
+func TestAbortNoProcess(t *testing.T) {
+	// 没有常驻进程的会话：Abort 应返回错误，且不得隐式启动新进程（否则会泄漏空闲进程）
+	e := New(Config{})
+	if err := e.Abort("ghost"); err == nil {
+		t.Fatal("Abort on session without rpc process should return error")
+	}
+	if n := e.SessionCount(); n != 0 {
+		t.Errorf("Abort must not spawn a process, session count = %d", n)
 	}
 }

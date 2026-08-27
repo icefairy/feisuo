@@ -14,6 +14,9 @@ type Message struct {
 	Depth int
 	// Origin 转发来源会话名（空=用户直接消息）
 	Origin string
+	// Interrupt 标记这条消息要打断当前 pi 任务（streamingBehavior=steer）。
+	// 仅由直接飞书用户消息在会话 busy 时设置；bridge 转发/attach 介入不打断。
+	Interrupt bool
 }
 
 type Session struct {
@@ -172,6 +175,19 @@ func (m *Manager) SetStatus(name, status string) {
 	s.mu.Lock()
 	s.Status = status
 	s.mu.Unlock()
+}
+
+// Status 返回会话当前状态（idle | busy | done | error | stopped）。不存在返回空。
+func (m *Manager) Status(name string) string {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Status
 }
 
 func (m *Manager) SetMessage(name, msg string) {

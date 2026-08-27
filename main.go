@@ -175,16 +175,19 @@ func main() {
 	piEng.SystemPromptOf = func(name string) string { return sm.Role(name) }
 	defer piEng.Close()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	fc := feishu.New(feishu.Config{
-		AppID:     cfg.Feishu.AppID,
-		AppSecret: cfg.Feishu.AppSecret,
-		BotName:   cfg.Feishu.BotName,
-		WsURL:     cfg.Feishu.WsURL,
+		AppID:           cfg.Feishu.AppID,
+		AppSecret:       cfg.Feishu.AppSecret,
+		BotName:         cfg.Feishu.BotName,
+		WsURL:           cfg.Feishu.WsURL,
+		WSHealthTimeout: time.Duration(cfg.Feishu.WSHealthTimeout) * time.Second,
+		Shutdown:        cancel,
 	})
 
 	parser := protocol.New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// 用 started 记录已启动的会话循环
 	started := make(map[string]bool)
@@ -266,8 +269,12 @@ func main() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	fmt.Println("\n正在退出...")
+	select {
+	case <-sig:
+		fmt.Println("\n正在退出...")
+	case <-ctx.Done():
+		fmt.Println("\nWS 健康检查触发退出，交由 supervisor 重建连接...")
+	}
 	cancel()
 }
 
@@ -311,9 +318,10 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 					}
 				}
 
-				// 通知飞书（流式编辑模式：一条消息内滚动更新）
+				// 通知飞书（流式编辑模式：一条消息内滚动更新）。
+				// busy 时的用户纠正/补充已在 handleFeishuEvent 里直接 piEng.Steer 打断
+				// 并走当前流显示，不会入队到这里；此处只处理正常（含 bridge/attach）消息。
 				fc.StreamBegin(feishuTarget, name)
-
 				piEng.Execute(ctx, name, msg.Content,
 					func(chunk string) {
 						sm.SetMessage(name, chunk)
@@ -404,6 +412,22 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 	if sm.Exists(target) && sm.Reopen(target) {
 		startLoop(target)
 		log.Printf("[dispatch] session %q reopened", target)
+	}
+	// 会话 busy（正在处理长任务）时，飞书用户直接消息**立即用 steer 打断**当前任务
+	// 并注入纠正/补充，不排队等待（不等任务跑完）。打断后 pi 的输出会走当前流的
+	// onChunk 回调显示给用户。空闲时不打断（正常排队）；bridge 转发与 attach 介入
+	// 不经过这里，保持 FIFO 队列不打断。
+	if sm.Status(target) == "busy" {
+		if err := piEng.Steer(target, msg.Content); err != nil {
+			// steer 失败（如会话无运行进程）：退化为排队，等待循环处理
+			log.Printf("[dispatch] session %q busy, steer failed: %v (fallback enqueue)", target, err)
+			if !sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender}) {
+				fc.Reply(sender, fmt.Sprintf("⚠️ 会话 `%s` 队列已满，消息被丢弃", target))
+			}
+			return
+		}
+		log.Printf("[dispatch] session %q busy, steered: %s", target, msg.Content)
+		return
 	}
 	if !sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender}) {
 		fc.Reply(sender, fmt.Sprintf("⚠️ 会话 `%s` 队列已满，消息被丢弃", target))
@@ -537,6 +561,24 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		}
 		fc.Reply(sender, fmt.Sprintf("🔄 已重置会话 `%s`（对话上下文已清空，历史无法恢复）", name))
 
+	case "stop":
+		// /STOP <会话> → 透传 pi abort：打断该会话当前正在跑的 pi 任务
+		// （不销毁会话，上下文保留）
+		name := cmd.Arg
+		if name == "" {
+			fc.Reply(sender, "❌ /STOP <会话> — 请指定会话名")
+			return
+		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
+			return
+		}
+		if err := piEng.Abort(name); err != nil {
+			fc.Reply(sender, fmt.Sprintf("❌ 停止会话 `%s` 当前任务失败: %v", name, err))
+			return
+		}
+		fc.Reply(sender, fmt.Sprintf("⏹ 已停止会话 `%s` 当前任务", name))
+
 	case "compact":
 		// /COMPACT <会话> → 透传 pi 原生 /compact：压缩当前会话上下文（保留关键信息，降 token 占用）
 		name := cmd.Arg
@@ -587,6 +629,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /STATUS             查看会话状态
   /KILL <会话>        终止会话（上下文保留，复活后恢复）
   /RESET <会话>       重置会话（透传 pi /new：清空对话上下文）
+  /STOP <会话>  停止当前任务(透传 pi abort,不销毁会话)
   /COMPACT <会话>     压缩会话上下文（透传 pi /compact：保留关键信息降 token）
   /NAME <旧> <新>     重命名会话
   普通消息            发给当前会话（/TO 切换后发往新会话）`)

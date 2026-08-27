@@ -260,9 +260,12 @@ func (c *rpcClient) removePendingLocked(id string) {
 	}
 }
 
-// prompt 发送 prompt 给 pi。使用 streamingBehavior=followUp 让 pi 原生排队：
-// agent 忙时自动排队，完成后依次处理（不用 feisuo 自己串行）。
-func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(string), onDone func(string, error)) {
+// prompt 发送 prompt 给 pi。
+// steer=false：streamingBehavior=followUp 让 pi 原生排队，agent 忙时自动排队，完成后依次处理
+// （不用 feisuo 自己串行）。
+// steer=true：streamingBehavior=steer 立即打断当前 agent 正在跑的任务，优先处理这条消息
+// （用于纠正/补充等需要立即生效的消息）。
+func (c *rpcClient) prompt(ctx context.Context, id, msg string, steer bool, onChunk func(string), onDone func(string, error)) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -300,13 +303,18 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, onChunk func(str
 		})
 	}
 
+	// streamingBehavior：followUp(FIFO 排队) 或 steer(打断当前任务立即处理)。
+	streamingBehavior := "followUp"
+	if steer {
+		streamingBehavior = "steer"
+	}
 	cmd := map[string]any{
 		"id":   id,
 		"type": "prompt",
 		"message": msg,
-		// 使用 pi 原生排队：当前 agent 忙时 followUp 会排队，等完成后自动处理下一条。
-		// 不自己串行（doneCh），避免与 pi 的队列机制冲突/重复实现。
-		"streamingBehavior": "followUp",
+		// 使用 pi 原生队列：当前 agent 忙时 followUp 排队，完成后依次处理；
+		// steer 则打断当前任务立即处理这条消息。不自己串行（doneCh），避免与 pi 队列冲突/重复实现。
+		"streamingBehavior": streamingBehavior,
 	}
 	if err := c.send(cmd); err != nil {
 		c.mu.Lock()
@@ -339,6 +347,19 @@ func (c *rpcClient) send(v any) error {
 // 等价 pi 交互模式的 /new。旧 session 文件留磁盘（可 switch_session 找回）。
 func (c *rpcClient) newSession() error {
 	return c.send(map[string]any{"type": "new_session"})
+}
+
+// abort 透传 pi 原生 abort：打断当前正在跑的 prompt（不销毁会话，上下文保留；
+// agent 空闲时发送是 no-op）。
+func (c *rpcClient) abort() error {
+	return c.send(map[string]any{"type": "abort"})
+}
+
+// steer 透传 pi 原生 steer：打断当前正在跑的 agent 并立即注入这条消息处理。
+// 与 abort 的区别：steer 会继续对话（打断当前 turn 后处理这条新输入），
+// abort 是停止。用于"用户发现问题立即追加纠正/补充信息"的场景。
+func (c *rpcClient) steer(msg string) error {
+	return c.send(map[string]any{"type": "steer", "message": msg})
 }
 
 // clearPending 清空该进程所有 pending prompt（reset 时若 agent 正在跑，

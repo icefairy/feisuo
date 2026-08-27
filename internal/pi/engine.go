@@ -77,13 +77,49 @@ func (e *Engine) Execute(ctx context.Context, session, prompt string,
 	e.seq++
 	id := fmt.Sprintf("f%d", e.seq)
 	log.Printf("[pi/%s] prompt id=%s: %s", session, id, prompt)
-	c.prompt(ctx, id, prompt, onChunk, func(final string, err error) {
+	c.prompt(ctx, id, prompt, false, onChunk, func(final string, err error) {
 		if err != nil {
 			log.Printf("[pi/%s] id=%s error: %v", session, id, err)
 			// 进程挂了？尝试重启（下次消息自动重连）
 			e.onProcessError(session, c)
 		} else {
 			log.Printf("[pi/%s] id=%s done len=%d", session, id, len(final))
+		}
+		onDone(final, err)
+	})
+}
+
+// ExecuteSteer 向指定会话的常驻 pi 进程发送 prompt，使用 steer 模式：
+// 立即打断当前正在跑的 agent 任务，优先处理这条消息（用于纠正/补充等）。
+// 会话首次使用时自动启动进程；onChunk 收到流式文本 delta，
+// onDone 收到完整回答或错误。onDone 时机按 pi 的 steer 语义（对应当前的 agent_settled/response）。
+func (e *Engine) ExecuteSteer(ctx context.Context, session, prompt string,
+	onChunk func(string), onDone func(string, error)) {
+
+	// 与 Execute 一致的超时策略
+	timeout := e.cfg.Timeout
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+		defer cancel()
+	}
+
+	c := e.getClient(session)
+	if c == nil {
+		onDone("", fmt.Errorf("start pi rpc for session %q failed", session))
+		return
+	}
+
+	e.seq++
+	id := fmt.Sprintf("f%d", e.seq)
+	log.Printf("[pi/%s] steer id=%s: %s", session, id, prompt)
+	c.prompt(ctx, id, prompt, true, onChunk, func(final string, err error) {
+		if err != nil {
+			log.Printf("[pi/%s] steer id=%s error: %v", session, id, err)
+			// 进程挂了？尝试重启（下次消息自动重连）
+			e.onProcessError(session, c)
+		} else {
+			log.Printf("[pi/%s] steer id=%s done len=%d", session, id, len(final))
 		}
 		onDone(final, err)
 	})
@@ -204,6 +240,48 @@ func (e *Engine) Reset(session string) error {
 	log.Printf("[pi/%s] reset: sending new_session", session)
 	c.clearPending("session reset")
 	return c.newSession()
+}
+
+// Abort 打断指定会话当前正在跑的 pi 任务（透传 pi 原生 abort）。
+// 不销毁会话、不重启进程、上下文保留；agent 空闲时 abort 是 no-op。
+// 会话没有常驻进程或进程已退出时返回错误——注意这里是查 map 而不是 getClient，
+// 避免为从未启动/已被 Kill 的会话隐式拉起新进程（否则 abort 会泄漏一个空闲进程）。
+func (e *Engine) Abort(session string) error {
+	e.mu.Lock()
+	c, ok := e.clients[session]
+	e.mu.Unlock()
+	if !ok || c == nil {
+		return fmt.Errorf("session %q: no pi rpc process", session)
+	}
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return fmt.Errorf("session %q: pi rpc process not running", session)
+	}
+	log.Printf("[pi/%s] abort: sending abort", session)
+	return c.abort()
+}
+
+// Steer 向指定会话的常驻 pi 进程发送 steer 命令：立即打断当前正在跑的 agent
+// 并注入这条消息处理（用于用户发现问题追加纠正/补充，不等任务跑完）。
+// 与 Abort 的区别：Steer 不中断对话，打断当前 turn 后 pi 会接着处理这条输入。
+// 会话未启动/进程不在 → 返回错误（不隐式拉起进程，避免泄漏空闲进程）。
+func (e *Engine) Steer(session, msg string) error {
+	e.mu.Lock()
+	c, ok := e.clients[session]
+	e.mu.Unlock()
+	if !ok || c == nil {
+		return fmt.Errorf("session %q: no pi rpc process", session)
+	}
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return fmt.Errorf("session %q: pi rpc process not running", session)
+	}
+	log.Printf("[pi/%s] steer: %s", session, msg)
+	return c.steer(msg)
 }
 
 // SessionCount 返回活跃常驻进程数（调试用）。
