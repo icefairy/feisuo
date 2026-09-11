@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"feisuo/internal/config"
 	"feisuo/internal/feishu"
 	"feisuo/internal/protocol"
 	"feisuo/internal/session"
@@ -53,7 +54,7 @@ func TestToSwitchThenPlainGoesToSwitchedSession(t *testing.T) {
 
 	// 1. 普通消息默认发 main
 	handleFeishuEvent(ctx, feishu.Event{Type: "message", SenderID: "ou_u", Message: feishu.Message{Content: "你好"}},
-		fc, protocol.New(), sm, nil, st, startLoop, "main")
+		fc, protocol.New(), sm, nil, st, startLoop, config.Config{}, "main")
 	if got := peekQueueTarget(sm, "main"); !got {
 		t.Fatal("切换前普通消息应进 main 会话队列")
 	}
@@ -63,14 +64,14 @@ func TestToSwitchThenPlainGoesToSwitchedSession(t *testing.T) {
 	if cmd.Type != protocol.CmdCommand || cmd.Session != "work" || cmd.Arg != "" {
 		t.Fatalf("解析 /TO work 失败: %+v", cmd)
 	}
-	handleCommand(ctx, cmd, fc, sm, "ou_u", st, startLoop, nil, "main")
+	handleCommand(ctx, cmd, fc, sm, "ou_u", st, startLoop, nil, config.Config{}, "main")
 	if got := sm.Current("ou_u", "main"); got != "work" {
 		t.Fatalf("/TO work 后当前会话应为 work, got %q", got)
 	}
 
 	// 3. 普通消息 → 应进 work 会话
 	handleFeishuEvent(ctx, feishu.Event{Type: "message", SenderID: "ou_u", Message: feishu.Message{Content: "在 work 里聊聊"}},
-		fc, protocol.New(), sm, nil, st, startLoop, "main")
+		fc, protocol.New(), sm, nil, st, startLoop, config.Config{}, "main")
 	if got := peekQueueTarget(sm, "work"); !got {
 		t.Fatal("切换后普通消息应进 work 会话队列")
 	}
@@ -86,7 +87,7 @@ func TestToWithMessageSwitchesAndSends(t *testing.T) {
 	sm.Create("work")
 
 	cmd := protocol.New().Parse(`/TO work 发条消息`)
-	handleCommand(context.Background(), cmd, fc, sm, "ou_u", mustOpenStore(t), func(string) {}, nil, "main")
+	handleCommand(context.Background(), cmd, fc, sm, "ou_u", mustOpenStore(t), func(string) {}, nil, config.Config{}, "main")
 	if got := sm.Current("ou_u", "main"); got != "work" {
 		t.Fatalf("/TO work 带消息后当前会话应为 work, got %q", got)
 	}

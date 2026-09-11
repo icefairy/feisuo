@@ -158,38 +158,16 @@ func main() {
 		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
 	}
 
-	// 根据配置创建引擎（pi | codebuddy，默认 pi）
-	var eng engine.Engine
-	piTimeout := 0
-	if cfg.Pi.Timeout != nil {
-		piTimeout = *cfg.Pi.Timeout
+	// 引擎选择：优先用 /switch 运行时持久化的选择，否则 yaml 的 engine（默认 pi）
+	chosenEngine := config.LoadEngineChoice(cfg.Sessions.DataDir)
+	if chosenEngine == "" {
+		chosenEngine = cfg.Engine
 	}
-	cbTimeout := 0
-	if cfg.CodeBuddy.Timeout != nil {
-		cbTimeout = *cfg.CodeBuddy.Timeout
+	if chosenEngine != "codebuddy" && chosenEngine != "cb" {
+		chosenEngine = "pi"
 	}
-	switch cfg.Engine {
-	case "codebuddy":
-		eng = codebuddy.New(codebuddy.Config{
-			Binary:   cfg.CodeBuddy.Binary,
-			Model:    cfg.CodeBuddy.Model,
-			APIKey:   cfg.CodeBuddy.APIKey,
-			Timeout:  cbTimeout,
-			SessionID: func(session string) string { return "feisuo-" + pi.ExportSanitizeSessionID(session) },
-		})
-	default:
-		eng = pi.New(pi.Config{
-			Binary:   cfg.Pi.Binary,
-			Provider: cfg.Pi.Provider,
-			Model:    cfg.Pi.Model,
-			APIKey:   cfg.Pi.APIKey,
-			Timeout:  piTimeout,
-		})
-	}
-	// 注入会话列表提供者：生成 bridge 协作协议
-eng.SetSessionList(func() []string { return sm.List() })
-	// 注入会话角色提供者：启动时注入自定义系统提示词
-eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
+
+	eng := newEngineSwitcher(buildEngine(cfg, chosenEngine, sm))
 	defer eng.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -270,7 +248,7 @@ eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
 			fc.Reply(ev.SenderID, fmt.Sprintf("🔒 你还没有授权使用飞梭。\n你的用户 ID: `%s`\n请管理员执行: `feisuo approve %s`\n授权后即可使用。", ev.SenderID, ev.SenderID))
 			return
 		}
-		handleFeishuEvent(ctx, ev, fc, parser, sm, eng, s, startLoop, cfg.Sessions.DefaultName)
+		handleFeishuEvent(ctx, ev, fc, parser, sm, eng, s, startLoop, cfg, cfg.Sessions.DefaultName)
 	})
 	if err != nil {
 		log.Fatalf("feishu: %v", err)
@@ -278,7 +256,7 @@ eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
 
 	fmt.Printf("飞梭 feisuo 启动\n")
 	fmt.Printf("  飞书: %s | 默认会话: %s\n", cfg.Feishu.BotName, cfg.Sessions.DefaultName)
-	if cfg.Engine == "codebuddy" {
+	if chosenEngine == "codebuddy" || chosenEngine == "cb" {
 		model := cfg.CodeBuddy.Model
 		if model == "" {
 			model = "codebuddy 默认模型"
@@ -294,7 +272,7 @@ eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
 	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 
-	go handleLocalInput(ctx, parser, sm, eng, fc, s, startLoop, cfg.Sessions.DefaultName)
+	go handleLocalInput(ctx, parser, sm, eng, fc, s, startLoop, cfg, cfg.Sessions.DefaultName)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -307,8 +285,42 @@ eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
 	cancel()
 }
 
+// buildEngine 按引擎名创建引擎实例，并注入会话列表/角色 provider。
+// /switch 命令与启动时共用，保证交互切换与初始启动行为一致。
+func buildEngine(cfg config.Config, name string, sm *session.Manager) engine.Engine {
+	var e engine.Engine
+	switch name {
+	case "codebuddy", "cb":
+		e = codebuddy.New(codebuddy.Config{
+			Binary:   cfg.CodeBuddy.Binary,
+			Model:    cfg.CodeBuddy.Model,
+			APIKey:   cfg.CodeBuddy.APIKey,
+			Timeout:  derefTimeout(cfg.CodeBuddy.Timeout),
+			SessionID: func(s string) string { return "feisuo-" + pi.ExportSanitizeSessionID(s) },
+		})
+	default:
+		e = pi.New(pi.Config{
+			Binary:   cfg.Pi.Binary,
+			Provider: cfg.Pi.Provider,
+			Model:    cfg.Pi.Model,
+			APIKey:   cfg.Pi.APIKey,
+			Timeout:  derefTimeout(cfg.Pi.Timeout),
+		})
+	}
+	e.SetSessionList(func() []string { return sm.List() })
+	e.SetSystemPromptOf(func(s string) string { return sm.Role(s) })
+	return e
+}
+
+func derefTimeout(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 // startSessionLoop 每个会话的消费循环
-func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng engine.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
+func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng *engineSwitcher, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,7 +431,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng
 }
 
 func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
-	parser *protocol.Parser, sm *session.Manager, eng engine.Engine, st *store.Store, startLoop func(string), defaultName string) {
+	parser *protocol.Parser, sm *session.Manager, eng *engineSwitcher, st *store.Store, startLoop func(string), cfg config.Config, defaultName string) {
 
 	msg := ev.Message
 	sender := ev.SenderID
@@ -427,7 +439,7 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 	cmd := parser.Parse(msg.Content)
 
 	if cmd.Type == protocol.CmdCommand {
-		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop, eng, defaultName)
+		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop, eng, cfg, defaultName)
 		return
 	}
 
@@ -464,7 +476,7 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 }
 
 func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
-	sm *session.Manager, sender string, st *store.Store, startLoop func(string), eng engine.Engine, defaultName string) {
+	sm *session.Manager, sender string, st *store.Store, startLoop func(string), eng *engineSwitcher, cfg config.Config, defaultName string) {
 
 	switch cmd.Cmd {
 	case "new":
@@ -649,6 +661,27 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		sm.Rename(parts[0], parts[1])
 		fc.Reply(sender, fmt.Sprintf("✏ 会话 `%s` → `%s`", parts[0], parts[1]))
 
+	case "switch":
+		// /SWITCH <pi|codebuddy|cb>：运行时切换执行引擎，立即生效并持久化
+		name := strings.ToLower(strings.TrimSpace(cmd.Arg))
+		if name == "" {
+			fc.Reply(sender, "❌ /SWITCH <pi|codebuddy|cb> — 切换执行引擎（立即生效，重启后保留）")
+			return
+		}
+		var target string
+		switch name {
+		case "pi":
+			target = "pi"
+		case "codebuddy", "cb":
+			target = "codebuddy"
+		default:
+			fc.Reply(sender, fmt.Sprintf("❌ 未知引擎: %s（可选 pi / codebuddy）", cmd.Arg))
+			return
+		}
+		eng.swap(buildEngine(cfg, target, sm))
+		_ = config.SaveEngineChoice(cfg.Sessions.DataDir, target)
+		fc.Reply(sender, fmt.Sprintf("🔁 已切换到引擎: %s（立即生效，重启后保留）", target))
+
 	case "help":
 		fc.Reply(sender, `🤖 飞梭命令:
   /TO <会话> [<消息>]  切换到指定会话（可带消息直接发送）
@@ -661,6 +694,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /STOP <会话>  停止当前任务(透传 pi abort,不销毁会话)
   /COMPACT <会话>     压缩会话上下文（透传 pi /compact：保留关键信息降 token）
   /NAME <旧> <新>     重命名会话
+  /SWITCH <pi|codebuddy>  运行时切换执行引擎（立即生效）
   普通消息            发给当前会话（/TO 切换后发往新会话）`)
 
 	default:
@@ -669,7 +703,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 }
 
 func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.Manager,
-	eng engine.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), defaultName string) {
+	eng *engineSwitcher, fc *feishu.Client, st *store.Store, startLoop func(string), cfg config.Config, defaultName string) {
 
 	for {
 		select {
@@ -692,7 +726,7 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 			}
 			cmd := parser.Parse(line)
 			if cmd.Type == protocol.CmdCommand {
-				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, eng, defaultName)
+				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, eng, cfg, defaultName)
 			} else {
 				// 本地输入同样发往当前对话的会话（/TO 切换后记住）
 				target := sm.Current("local", defaultName)

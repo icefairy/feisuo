@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -104,4 +105,29 @@ func expandHome(s string) string {
 		return filepath.Join(home, s[2:])
 	}
 	return s
+}
+
+// SaveEngineChoice 记录当前生效的引擎（/switch 运行时切换），重启后保留。
+func SaveEngineChoice(dataDir, engineName string) error {
+	if dataDir == "" {
+		return nil
+	}
+	dir := expandHome(dataDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "engine.choice"), []byte(engineName), 0644)
+}
+
+// LoadEngineChoice 读取 /switch 持久化的引擎选择；无记录返回空串。
+// 文件名不带 .json 后缀，避免被 store.Load 当作会话记录解析。
+func LoadEngineChoice(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(expandHome(dataDir), "engine.choice"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }

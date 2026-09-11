@@ -109,6 +109,8 @@ feisuo list-auth           # 查看已授权 + 待授权申请列表
 | `/KILL 分析` | 终止会话（真正杀 pi 进程；下次消息自动复活） |
 | `/RESET 分析` | 重置会话（透传 pi `/new`：清空对话上下文，进程不重启） |
 | `/NAME 旧名 新名` | 重命名会话 |
+| `/SWITCH pi` | 运行时切换执行引擎为 pi（立即生效，重启后保留） |
+| `/SWITCH codebuddy` 或 `/SWITCH cb` | 运行时切换执行引擎为 CodeBuddy（立即生效，重启后保留） |
 | `/HELP` | 查看帮助 |
 
 
