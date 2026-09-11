@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -232,7 +233,7 @@ func (e *Engine) getClient(session string) *rpcClient {
 	}
 	cfg := e.cfg
 	sessionID := cfg.SessionID(session)
-	binary := cfg.Binary
+	binary := resolveBinary(cfg.Binary)
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -721,6 +722,41 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// resolveBinary 解析 codebuddy 可执行文件路径。
+// supervisor 等守护进程的 PATH 通常不含 ~/.local/bin、npm 全局目录等用户级安装路径
+// （exec.Command 用父进程 PATH 解析二进制，cmd.Env 不参与），导致 Start 报
+// "executable file not found in $PATH"。这里按序尝试：PATH → 常见安装目录 → 原样（交给 Start 报错）。
+func resolveBinary(binary string) string {
+	if binary == "" {
+		binary = "codebuddy"
+	}
+	if strings.ContainsRune(binary, os.PathSeparator) || strings.ContainsRune(binary, '/') {
+		return binary // 已是路径（相对/绝对），直接用
+	}
+	if p, err := exec.LookPath(binary); err == nil {
+		return p
+	}
+	// 常见用户级安装位置
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(home, ".local", "bin", binary),
+			filepath.Join(home, ".npm-global", "bin", binary),
+			filepath.Join(home, "AppData", "Roaming", "npm", binary+".cmd"),
+		)
+	}
+	candidates = append(candidates,
+		filepath.Join("/usr", "local", "bin", binary),
+		filepath.Join("/opt", "homebrew", "bin", binary),
+	)
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return binary
 }
 
 // appendSystemPrompt 拼接进程启动时注入的 --append-system-prompt：
