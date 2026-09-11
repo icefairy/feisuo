@@ -1,0 +1,4 @@
+{"type":"result","subtype":"success","result":""}
+{"type":"system","subtype":"init","session_id":"feisuo-test-2"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}
+{"type":"result","subtype":"success","result":"OK"}

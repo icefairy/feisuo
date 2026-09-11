@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"429 限流"}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"429 您的使用量已超出频率限制"}

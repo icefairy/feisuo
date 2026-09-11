@@ -290,3 +290,11 @@ func (e *Engine) SessionCount() int {
 	defer e.mu.Unlock()
 	return len(e.clients)
 }
+
+// SetSessionList 实现 engine.Engine 接口：注入会话列表提供者。
+func (e *Engine) SetSessionList(fn func() []string) { e.SessionList = fn }
+
+// SetSystemPromptOf 实现 engine.Engine 接口：注入会话角色提供者。
+func (e *Engine) SetSystemPromptOf(fn func(string) string) { e.SystemPromptOf = fn }
+// Export sanitizeSessionID for use by other packages
+func ExportSanitizeSessionID(name string) string { return sanitizeSessionID(name) }

@@ -8,9 +8,11 @@ import (
 )
 
 type Config struct {
-	Feishu   FeishuConfig  `yaml:"feishu"`
-	Pi       PiConfig      `yaml:"pi"`
-	Sessions SessionConfig `yaml:"sessions"`
+	Feishu    FeishuConfig  `yaml:"feishu"`
+	Engine    string        `yaml:"engine"`     // "pi" | "codebuddy"，默认 pi
+	Pi        PiConfig      `yaml:"pi"`
+	CodeBuddy CodeBuddyConfig `yaml:"codebuddy"`
+	Sessions  SessionConfig `yaml:"sessions"`
 }
 
 type FeishuConfig struct {
@@ -22,12 +24,20 @@ type FeishuConfig struct {
 }
 
 type PiConfig struct {
-	Binary  string `yaml:"binary"`
+	Binary   string `yaml:"binary"`
 	Provider string `yaml:"provider"`
-	Model   string `yaml:"model"`
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Timeout *int   `yaml:"timeout"` // seconds；nil=默认 1800，显式 0=不超时（空闲等待不中断）
+	Model    string `yaml:"model"`
+	BaseURL  string `yaml:"base_url"`
+	APIKey   string `yaml:"api_key"`
+	Timeout  *int   `yaml:"timeout"` // seconds；nil=默认 1800，显式 0=不超时（空闲等待不中断）
+}
+
+// CodeBuddyConfig 是 codebuddy 引擎的配置。
+type CodeBuddyConfig struct {
+	Binary   string `yaml:"binary"`   // "codebuddy"
+	Model    string `yaml:"model"`    // 如 "deepseek-v4.1-flash"
+	APIKey   string `yaml:"api_key"`  // 非空时设置为 CODEBUDDY_API_KEY 环境变量
+	Timeout  *int   `yaml:"timeout"`  // seconds；nil=默认 1800
 }
 
 type SessionConfig struct {
@@ -58,16 +68,28 @@ func applyDefaults(c *Config) {
 	if c.Feishu.WSHealthTimeout <= 0 {
 		c.Feishu.WSHealthTimeout = 600
 	}
+	// 引擎选择：默认 pi
+	if c.Engine == "" {
+		c.Engine = "pi"
+	}
+	// Pi 默认配置
 	if c.Pi.Binary == "" {
 		c.Pi.Binary = "pi"
 	}
 	if c.Pi.Provider == "" {
 		c.Pi.Provider = "openai"
 	}
-	// 未配置时给默认 1800（防卡死兑底）；显式 timeout: 0 保留为 0（不超时，空闲等待不中断）
 	if c.Pi.Timeout == nil {
 		def := 1800
 		c.Pi.Timeout = &def
+	}
+	// CodeBuddy 默认配置
+	if c.CodeBuddy.Binary == "" {
+		c.CodeBuddy.Binary = "codebuddy"
+	}
+	if c.CodeBuddy.Timeout == nil {
+		def := 1800
+		c.CodeBuddy.Timeout = &def
 	}
 	if c.Sessions.DataDir == "" {
 		c.Sessions.DataDir = "~/.feisuo/sessions"

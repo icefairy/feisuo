@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"feisuo-test-1"}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"DNS"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"(域名系统)"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"是把网址翻译成IP地址的互联网电话簿。"}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"DNS(域名系统)是把网址翻译成IP地址的互联网电话簿。"}]}}
+{"type":"result","subtype":"success","result":"DNS(域名系统)是把网址翻译成IP地址的互联网电话簿。"}

@@ -13,7 +13,9 @@ import (
 
 	"feisuo/internal/auth"
 	"feisuo/internal/bridge"
+	"feisuo/internal/codebuddy"
 	"feisuo/internal/config"
+	"feisuo/internal/engine"
 	"feisuo/internal/feishu"
 	"feisuo/internal/pi"
 	"feisuo/internal/protocol"
@@ -156,24 +158,40 @@ func main() {
 		sm.Enqueue(sessionName, session.Message{Content: content, Sender: sender})
 	}
 
-	// pi 超时：nil→默认 1800，显式 0→不超时（空闲等待用户时不被 30 分钟 timer 误中断）
+	// 根据配置创建引擎（pi | codebuddy，默认 pi）
+	var eng engine.Engine
 	piTimeout := 0
 	if cfg.Pi.Timeout != nil {
 		piTimeout = *cfg.Pi.Timeout
 	}
-	piEng := pi.New(pi.Config{
-		Binary:   cfg.Pi.Binary,
-		Provider: cfg.Pi.Provider,
-		Model:    cfg.Pi.Model,
-		BaseURL:  cfg.Pi.BaseURL,
-		APIKey:   cfg.Pi.APIKey,
-		Timeout:  piTimeout,
-	})
-	// 注入会话列表提供者：pi 启动时生成 bridge 协作协议（可转发给哪些会话）
-	piEng.SessionList = func() []string { return sm.List() }
-	// 注入会话角色提供者：pi 启动时注入自定义系统提示词
-	piEng.SystemPromptOf = func(name string) string { return sm.Role(name) }
-	defer piEng.Close()
+	cbTimeout := 0
+	if cfg.CodeBuddy.Timeout != nil {
+		cbTimeout = *cfg.CodeBuddy.Timeout
+	}
+	switch cfg.Engine {
+	case "codebuddy":
+		eng = codebuddy.New(codebuddy.Config{
+			Binary:   cfg.CodeBuddy.Binary,
+			Model:    cfg.CodeBuddy.Model,
+			APIKey:   cfg.CodeBuddy.APIKey,
+			Timeout:  cbTimeout,
+			SessionID: func(session string) string { return "feisuo-" + pi.ExportSanitizeSessionID(session) },
+		})
+	default:
+		eng = pi.New(pi.Config{
+			Binary:   cfg.Pi.Binary,
+			Provider: cfg.Pi.Provider,
+			Model:    cfg.Pi.Model,
+			BaseURL:  cfg.Pi.BaseURL,
+			APIKey:   cfg.Pi.APIKey,
+			Timeout:  piTimeout,
+		})
+	}
+	// 注入会话列表提供者：生成 bridge 协作协议
+eng.SetSessionList(func() []string { return sm.List() })
+	// 注入会话角色提供者：启动时注入自定义系统提示词
+eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
+	defer eng.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -198,7 +216,7 @@ func main() {
 			return
 		}
 		started[name] = true
-		go startSessionLoop(ctx, name, sm, piEng, fc, s, startLoop, sockSrv)
+		go startSessionLoop(ctx, name, sm, eng, fc, s, startLoop, sockSrv)
 	}
 
 	// startLoop 定义完成后，注入完整版 OnInput（stopped 会话 Reopen + 重启循环）
@@ -253,7 +271,7 @@ func main() {
 			fc.Reply(ev.SenderID, fmt.Sprintf("🔒 你还没有授权使用飞梭。\n你的用户 ID: `%s`\n请管理员执行: `feisuo approve %s`\n授权后即可使用。", ev.SenderID, ev.SenderID))
 			return
 		}
-		handleFeishuEvent(ctx, ev, fc, parser, sm, piEng, s, startLoop, cfg.Sessions.DefaultName)
+		handleFeishuEvent(ctx, ev, fc, parser, sm, eng, s, startLoop, cfg.Sessions.DefaultName)
 	})
 	if err != nil {
 		log.Fatalf("feishu: %v", err)
@@ -265,7 +283,7 @@ func main() {
 	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 
-	go handleLocalInput(ctx, parser, sm, piEng, fc, s, startLoop, cfg.Sessions.DefaultName)
+	go handleLocalInput(ctx, parser, sm, eng, fc, s, startLoop, cfg.Sessions.DefaultName)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -279,7 +297,7 @@ func main() {
 }
 
 // startSessionLoop 每个会话的消费循环
-func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
+func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng engine.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -319,10 +337,10 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 				}
 
 				// 通知飞书（流式编辑模式：一条消息内滚动更新）。
-				// busy 时的用户纠正/补充已在 handleFeishuEvent 里直接 piEng.Steer 打断
+				// busy 时的用户纠正/补充已在 handleFeishuEvent 里直接 eng.Steer 打断
 				// 并走当前流显示，不会入队到这里；此处只处理正常（含 bridge/attach）消息。
 				fc.StreamBegin(feishuTarget, name)
-				piEng.Execute(ctx, name, msg.Content,
+				eng.Execute(ctx, name, msg.Content,
 					func(chunk string) {
 						sm.SetMessage(name, chunk)
 						fc.StreamChunk(feishuTarget, name, chunk)
@@ -390,7 +408,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, piE
 }
 
 func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
-	parser *protocol.Parser, sm *session.Manager, piEng *pi.Engine, st *store.Store, startLoop func(string), defaultName string) {
+	parser *protocol.Parser, sm *session.Manager, eng engine.Engine, st *store.Store, startLoop func(string), defaultName string) {
 
 	msg := ev.Message
 	sender := ev.SenderID
@@ -398,7 +416,7 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 	cmd := parser.Parse(msg.Content)
 
 	if cmd.Type == protocol.CmdCommand {
-		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop, piEng, defaultName)
+		handleCommand(ctx, cmd, fc, sm, sender, st, startLoop, eng, defaultName)
 		return
 	}
 
@@ -418,7 +436,7 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 	// onChunk 回调显示给用户。空闲时不打断（正常排队）；bridge 转发与 attach 介入
 	// 不经过这里，保持 FIFO 队列不打断。
 	if sm.Status(target) == "busy" {
-		if err := piEng.Steer(target, msg.Content); err != nil {
+		if err := eng.Steer(target, msg.Content); err != nil {
 			// steer 失败（如会话无运行进程）：退化为排队，等待循环处理
 			log.Printf("[dispatch] session %q busy, steer failed: %v (fallback enqueue)", target, err)
 			if !sm.Enqueue(target, session.Message{Content: msg.Content, Sender: sender}) {
@@ -435,7 +453,7 @@ func handleFeishuEvent(ctx context.Context, ev feishu.Event, fc *feishu.Client,
 }
 
 func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
-	sm *session.Manager, sender string, st *store.Store, startLoop func(string), piEng *pi.Engine, defaultName string) {
+	sm *session.Manager, sender string, st *store.Store, startLoop func(string), eng engine.Engine, defaultName string) {
 
 	switch cmd.Cmd {
 	case "new":
@@ -472,7 +490,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		if cmd.Role != "" {
 			sm.SetRole(name, cmd.Role)
 			// 角色变更需要重启 pi 进程才能生效（下次消息自动拉起新进程）
-			piEng.Kill(name)
+			eng.Kill(name)
 			if se, ok := sm.Get(name); ok {
 				st.Save(se)
 			}
@@ -531,7 +549,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			fc.Reply(sender, "❌ 不能关闭默认会话 `main`")
 			return
 		}
-		piEng.Kill(name)
+		eng.Kill(name)
 		sm.Kill(name)
 		if se, ok := sm.Get(name); ok {
 			st.Save(se) // 持久化 stopped 状态：重启后不恢复
@@ -549,7 +567,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
 			return
 		}
-		if err := piEng.Reset(name); err != nil {
+		if err := eng.Reset(name); err != nil {
 			fc.Reply(sender, fmt.Sprintf("❌ 重置会话 `%s` 失败: %v", name, err))
 			return
 		}
@@ -573,7 +591,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，用 /LIST 查看", name))
 			return
 		}
-		if err := piEng.Abort(name); err != nil {
+		if err := eng.Abort(name); err != nil {
 			fc.Reply(sender, fmt.Sprintf("❌ 停止会话 `%s` 当前任务失败: %v", name, err))
 			return
 		}
@@ -594,7 +612,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		// compact 结果是一次性总结，不流式编辑（避免 roll 裂成多卡"蹦字"）。
 		// onChunk 只累积，onDone 一次性发完整总结。
 		var compactBuf strings.Builder
-		piEng.Execute(ctx, name, "/compact",
+		eng.Execute(ctx, name, "/compact",
 			func(chunk string) {
 				compactBuf.WriteString(chunk)
 			},
@@ -640,7 +658,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 }
 
 func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.Manager,
-	piEng *pi.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), defaultName string) {
+	eng engine.Engine, fc *feishu.Client, st *store.Store, startLoop func(string), defaultName string) {
 
 	for {
 		select {
@@ -663,7 +681,7 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 			}
 			cmd := parser.Parse(line)
 			if cmd.Type == protocol.CmdCommand {
-				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, piEng, defaultName)
+				handleCommand(ctx, cmd, fc, sm, "local", st, startLoop, eng, defaultName)
 			} else {
 				// 本地输入同样发往当前对话的会话（/TO 切换后记住）
 				target := sm.Current("local", defaultName)

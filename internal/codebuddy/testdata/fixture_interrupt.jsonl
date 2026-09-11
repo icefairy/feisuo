@@ -1,0 +1,3 @@
+{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"interrupted":true}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Interrupted by user"}]}}
+{"type":"result","subtype":"success","result":""}
