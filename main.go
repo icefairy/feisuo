@@ -182,7 +182,6 @@ func main() {
 			Binary:   cfg.Pi.Binary,
 			Provider: cfg.Pi.Provider,
 			Model:    cfg.Pi.Model,
-			BaseURL:  cfg.Pi.BaseURL,
 			APIKey:   cfg.Pi.APIKey,
 			Timeout:  piTimeout,
 		})
@@ -279,7 +278,19 @@ eng.SetSystemPromptOf(func(name string) string { return sm.Role(name) })
 
 	fmt.Printf("飞梭 feisuo 启动\n")
 	fmt.Printf("  飞书: %s | 默认会话: %s\n", cfg.Feishu.BotName, cfg.Sessions.DefaultName)
-	fmt.Printf("  Pi: %s @ %s\n", cfg.Pi.Model, cfg.Pi.BaseURL)
+	if cfg.Engine == "codebuddy" {
+		model := cfg.CodeBuddy.Model
+		if model == "" {
+			model = "codebuddy 默认模型"
+		}
+		fmt.Printf("  引擎: CodeBuddy（%s）\n", model)
+	} else {
+		if cfg.Pi.Model != "" || cfg.Pi.Provider != "" {
+			fmt.Printf("  引擎: pi（provider=%s model=%s）\n", cfg.Pi.Provider, cfg.Pi.Model)
+		} else {
+			fmt.Printf("  引擎: pi（pi 自身默认配置）\n")
+		}
+	}
 	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 

@@ -36,13 +36,19 @@ type pendingPrompt struct {
 }
 
 // startRPC 启动常驻 pi RPC 进程。
+// provider/model/api-key 均可空：空时省略对应参数，pi 使用自身配置
+// （pi auth / models.json 中已配置的默认 provider、模型与凭据）。
 func startRPC(ctx context.Context, cfg Config) (*rpcClient, error) {
 	args := []string{
 		"--mode", "rpc",
 		"--no-skills",
 		"-na",
-		"--provider", cfg.Provider,
-		"--model", cfg.Model,
+	}
+	if cfg.Provider != "" {
+		args = append(args, "--provider", cfg.Provider)
+	}
+	if cfg.Model != "" {
+		args = append(args, "--model", cfg.Model)
 	}
 	if cfg.SessionID != "" {
 		args = append(args, "--session-id", cfg.SessionID)

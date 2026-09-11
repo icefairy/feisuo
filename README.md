@@ -40,24 +40,28 @@ vim feisuo.yaml   # 填入飞书凭证 + pi 参数
 ```
 
 ```yaml
+engine: "codebuddy"   # pi | codebuddy（默认 pi）
+
 feishu:
   app_id: "cli_xxxxxxxxxx"      # 飞书应用 App ID
   app_secret: "xxxxxxxxxxxxxxx" # 飞书应用 App Secret
   bot_name: "飞梭"
   ws_url: "wss://open.feishu.cn/ws/v1/ws/"
 
-pi:
-  binary: "pi"                  # pi CLI 路径
-  provider: "agentrium"   # 与 pi auth/models.json 中配置的 provider 名一致
-  model: "deepseek-v4-flash"
-  base_url: "http://127.0.0.1:3000/v1"   # OpenAI 兼容端点
-  api_key: "your-api-key-here"
-  timeout: 300                  # 单任务超时（秒）
+pi:                    # engine: pi 时使用
+  binary: "pi"         # pi CLI 路径；provider/model/api_key 可选，空则用 pi 自身配置
+  timeout: 1800        # 单任务超时（秒）
+
+codebuddy:             # engine: codebuddy 时使用；本机登录凭据，无需 api_key
+  binary: "codebuddy"
+  timeout: 1800
 
 sessions:
   data_dir: "~/.feisuo/sessions" # 会话状态 + 授权列表存储
   default_name: "main"           # 默认会话名
 ```
+
+> 模型与凭据**不在飞梭配置**：pi 引擎复用 `pi auth` / models.json 的配置，codebuddy 引擎复用本机登录凭据。codebuddy 引擎以 headless 权限全通过模式运行（无人值守不弹审批）。
 
 ### 3. 编译 & 运行
 
@@ -127,7 +131,7 @@ pi 在回复中可输出协作标记，feisuo 自动转发给目标会话，目�
 $ ./feisuo feisuo.yaml
 飞梭 feisuo 启动
   飞书: 飞梭 | 默认会话: main
-  Pi: deepseek-v4-flash @ http://127.0.0.1:3000/v1
+  引擎: CodeBuddy（codebuddy 默认模型）
   命令: /TO <会话> <消息> | /NEW <名> | /LIST | /STATUS | /KILL <名> | /RESET <名>
   Ctrl+C 退出
 feisuo> /NEW 排障

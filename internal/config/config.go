@@ -23,21 +23,23 @@ type FeishuConfig struct {
 	WSHealthTimeout int    `yaml:"ws_health_timeout"` // 秒；0 或不配置 = 默认 600，WS 僵死自愈阈值
 }
 
+// PiConfig 是 pi 引擎的配置。Provider/Model/APIKey 均可空：
+// 空时 feisuo 不传对应参数，pi 使用自身配置（pi auth / models.json）。
 type PiConfig struct {
 	Binary   string `yaml:"binary"`
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	BaseURL  string `yaml:"base_url"`
-	APIKey   string `yaml:"api_key"`
-	Timeout  *int   `yaml:"timeout"` // seconds；nil=默认 1800，显式 0=不超时（空闲等待不中断）
+	Provider string `yaml:"provider"` // 可选，覆盖 pi 默认 provider
+	Model    string `yaml:"model"`    // 可选，覆盖 pi 默认模型
+	APIKey   string `yaml:"api_key"`  // 可选，覆盖 pi 自身凭据
+	Timeout  *int   `yaml:"timeout"`  // seconds；nil=默认 1800，显式 0=不超时（空闲等待不中断）
 }
 
 // CodeBuddyConfig 是 codebuddy 引擎的配置。
+// 默认使用 codebuddy 本机登录凭据与默认模型，无需 api_key/model。
 type CodeBuddyConfig struct {
-	Binary   string `yaml:"binary"`   // "codebuddy"
-	Model    string `yaml:"model"`    // 如 "deepseek-v4.1-flash"
-	APIKey   string `yaml:"api_key"`  // 非空时设置为 CODEBUDDY_API_KEY 环境变量
-	Timeout  *int   `yaml:"timeout"`  // seconds；nil=默认 1800
+	Binary  string `yaml:"binary"`  // "codebuddy"
+	Model   string `yaml:"model"`   // 可选，如 "deepseek-v4.1-flash"；空=codebuddy 默认模型
+	APIKey  string `yaml:"api_key"` // 可选，非空时设置为 CODEBUDDY_API_KEY 环境变量
+	Timeout *int   `yaml:"timeout"` // seconds；nil=默认 1800
 }
 
 type SessionConfig struct {
@@ -72,12 +74,9 @@ func applyDefaults(c *Config) {
 	if c.Engine == "" {
 		c.Engine = "pi"
 	}
-	// Pi 默认配置
+	// Pi 默认配置（provider/model/api_key 不设默认：空=用 pi 自身配置）
 	if c.Pi.Binary == "" {
 		c.Pi.Binary = "pi"
-	}
-	if c.Pi.Provider == "" {
-		c.Pi.Provider = "openai"
 	}
 	if c.Pi.Timeout == nil {
 		def := 1800

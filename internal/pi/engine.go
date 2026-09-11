@@ -11,9 +11,10 @@ import (
 
 type Config struct {
 	Binary   string
+	// Provider/Model/APIKey 均可空：空时省略对应命令行参数，
+	// pi 使用自身配置（pi auth / models.json）中的默认值与凭据。
 	Provider string
 	Model    string
-	BaseURL  string
 	APIKey   string
 	Timeout  int
 	// SessionID 指定 pi 会话 id（持久化对话历史，重启后恢复上下文）。
