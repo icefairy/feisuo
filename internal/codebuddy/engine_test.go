@@ -4,40 +4,67 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
+// TestApplyWorkDir：工作目录注入到进程；目录不存在则保持默认。
+func TestApplyWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	e := New(Config{})
+	cmd := exec.Command("true")
+
+	e.applyWorkDir(cmd, "repo") // 未注入 provider
+	if cmd.Dir != "" {
+		t.Fatalf("未注入时不应设置 Dir, got %q", cmd.Dir)
+	}
+
+	e.SetWorkDirOf(func(string) string { return "  " + dir + "  " })
+	e.applyWorkDir(cmd, "repo")
+	if cmd.Dir != dir {
+		t.Fatalf("Dir 应为 %q, got %q", dir, cmd.Dir)
+	}
+
+	e.SetWorkDirOf(func(string) string { return filepath.Join(dir, "missing") })
+	cmd.Dir = ""
+	e.applyWorkDir(cmd, "repo")
+	if cmd.Dir != "" {
+		t.Fatalf("目录不存在时应保持默认, got %q", cmd.Dir)
+	}
+}
+
 // TestParseEvents 用真实 stream-json fixture 验证事件解析逻辑。
 func TestParseEvents(t *testing.T) {
 	cases := []struct {
-		name         string
-		fixture      string
-		wantChunks   []string
-		wantFinal    string
-		wantErr      bool
+		name            string
+		fixture         string
+		wantChunks      []string
+		wantFinal       string
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
-			name:      "normal streaming",
-			fixture:   "testdata/fixture_normal.jsonl",
+			name:       "normal streaming",
+			fixture:    "testdata/fixture_normal.jsonl",
 			wantChunks: []string{"DNS", "(域名系统)", "是把网址翻译成IP地址的互联网电话簿。"},
-			wantFinal: "DNS(域名系统)是把网址翻译成IP地址的互联网电话簿。",
+			wantFinal:  "DNS(域名系统)是把网址翻译成IP地址的互联网电话簿。",
 		},
 		{
-			name:      "interrupt followed by new message",
-			fixture:   "testdata/fixture_interrupt.jsonl",
+			name:    "interrupt followed by new message",
+			fixture: "testdata/fixture_interrupt.jsonl",
 			// 中断后第一轮的 result 为空，但 assistant 文本 "Interrupted by user" 已流式到达
 			// 所以 final = buf.String() = "Interrupted by user"
 			wantFinal: "Interrupted by user",
 		},
 		{
-			name:              "error result",
-			fixture:           "testdata/fixture_error.jsonl",
-			wantErr:           true,
-			wantErrContains:   "429",
-			wantFinal:         "429 限流", // error 时 onDone 仍带文本
+			name:            "error result",
+			fixture:         "testdata/fixture_error.jsonl",
+			wantErr:         true,
+			wantErrContains: "429",
+			wantFinal:       "429 限流", // error 时 onDone 仍带文本
 		},
 	}
 

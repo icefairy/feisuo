@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +21,17 @@ type Message struct {
 }
 
 type Session struct {
-	Name       string
-	Status     string // idle | busy | done | error | stopped
-	Message    string
-	Queue      chan Message
-	StartedAt  time.Time
-	StoppedAt  *time.Time
-	Err        string
+	Name         string
+	Status       string // idle | busy | done | error | stopped
+	Message      string
+	Queue        chan Message
+	StartedAt    time.Time
+	StoppedAt    *time.Time
+	Err          string
 	SystemPrompt string // 会话角色/系统提示词（可空）
-	LastSender string // 最后活跃的飞书用户（attach 介入时用此 ID 发送回复）
-	mu         sync.Mutex
+	WorkDir      string // 会话工作目录（绝对路径，可空=用 feisuo 启动目录）
+	LastSender   string // 最后活跃的飞书用户（attach 介入时用此 ID 发送回复）
+	mu           sync.Mutex
 }
 
 func NewSession(name string) *Session {
@@ -46,8 +48,8 @@ type Manager struct {
 	mu       sync.RWMutex
 
 	// current 记录每个 sender 当前正在对话的会话（/TO 切换后记住，普通消息发往这里）
-	curMu    sync.Mutex
-	current  map[string]string
+	curMu   sync.Mutex
+	current map[string]string
 }
 
 func New() *Manager {
@@ -121,6 +123,33 @@ func (m *Manager) Role(name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.SystemPrompt
+}
+
+// SetWorkDir 设置会话工作目录（由调用方校验为存在的绝对路径）。返回是否成功。
+func (m *Manager) SetWorkDir(name, dir string) bool {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	s.WorkDir = dir
+	s.mu.Unlock()
+	return true
+}
+
+// WorkDir 返回会话工作目录（不存在或未设置返回空）。
+func (m *Manager) WorkDir(name string) string {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.WorkDir
 }
 
 func (m *Manager) Exists(name string) bool {
@@ -310,6 +339,9 @@ func (m *Manager) FormatStatus() string {
 		line := fmt.Sprintf("  %s %-12s %s", icon, s.Name, statusDesc(s))
 		if s.SystemPrompt != "" {
 			line += " 🎭" + truncateRole(s.SystemPrompt, 24)
+		}
+		if s.WorkDir != "" {
+			line += " 📁" + filepath.Base(s.WorkDir)
 		}
 		lines = append(lines, line)
 		s.mu.Unlock()

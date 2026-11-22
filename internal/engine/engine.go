@@ -32,4 +32,7 @@ type Engine interface {
 	SetSessionList(fn func() []string)
 	// SetSystemPromptOf 注入会话角色提供者，用于启动时注入自定义系统提示词。
 	SetSystemPromptOf(fn func(string) string)
+	// SetWorkDirOf 注入会话工作目录提供者，用于启动常驻进程时设置 cmd.Dir。
+	// 返回空串表示用 feisuo 启动目录（默认行为）。
+	SetWorkDirOf(fn func(session string) string)
 }

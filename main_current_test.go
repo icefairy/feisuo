@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +16,24 @@ import (
 	"feisuo/internal/session"
 	"feisuo/internal/store"
 )
+
+func TestResolveWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolveWorkDir(dir)
+	if err != nil || got != dir {
+		t.Fatalf("绝对路径解析失败: got=%q err=%v", got, err)
+	}
+	if _, err := resolveWorkDir(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("不存在的目录应报错")
+	}
+	f := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveWorkDir(f); err == nil {
+		t.Fatal("文件路径应报错")
+	}
+}
 
 // mockFeishu 返回 token 和消息接口都 200 的 mock 飞书
 func mockFeishu() (*httptest.Server, *feishu.Client) {
@@ -33,6 +53,37 @@ func mockFeishu() (*httptest.Server, *feishu.Client) {
 	fc := feishu.New(feishu.Config{AppID: "app", AppSecret: "sec", BotName: "飞梭"})
 	fc.SetBaseURL(srv.URL) // 测试注入 mock 端点
 	return srv, fc
+}
+
+// TestCDSetAndPersist：/CD 设置工作目录并落盘；/CD 无参数可查看
+func TestCDSetAndPersist(t *testing.T) {
+	srv, fc := mockFeishu()
+	defer srv.Close()
+
+	sm := session.New()
+	sm.Create("repo")
+	st := mustOpenStore(t)
+	eng := newEngineSwitcher((&fakeEngine{}).asEngine())
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := protocol.New().Parse("/CD repo " + dir)
+	if cmd.Cmd != "cd" || cmd.Session != "repo" {
+		t.Fatalf("解析 /CD 失败: %+v", cmd)
+	}
+	handleCommand(ctx, cmd, fc, sm, "ou_u", st, func(string) {}, eng, config.Config{}, "main")
+	if got := sm.WorkDir("repo"); got != dir {
+		t.Fatalf("工作目录未设置, got %q want %q", got, dir)
+	}
+	if rec, ok := st.Load()["repo"]; !ok || rec.WorkDir != dir {
+		t.Fatalf("工作目录未持久化: %+v", rec)
+	}
+
+	// 查看命令不应改动已设置的目录
+	handleCommand(ctx, protocol.New().Parse("/CD repo"), fc, sm, "ou_u", st, func(string) {}, eng, config.Config{}, "main")
+	if got := sm.WorkDir("repo"); got != dir {
+		t.Fatalf("查看命令不应改动工作目录, got %q", got)
+	}
 }
 
 // TestToSwitchThenPlainGoesToSwitchedSession：

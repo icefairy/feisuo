@@ -10,7 +10,7 @@ import (
 )
 
 type Config struct {
-	Binary   string
+	Binary string
 	// Provider/Model/APIKey 均可空：空时省略对应命令行参数，
 	// pi 使用自身配置（pi auth / models.json）中的默认值与凭据。
 	Provider string
@@ -22,6 +22,8 @@ type Config struct {
 	SessionID string
 	// AppendSystemPrompt 追加到 system prompt（会话协作协议等），可空
 	AppendSystemPrompt string
+	// WorkDir 常驻进程工作目录（会话级）；空则用 feisuo 启动目录
+	WorkDir string
 }
 
 type Message struct {
@@ -42,6 +44,9 @@ type Engine struct {
 	// SystemPromptOf 返回指定会话的自定义系统提示词（角色），用于启动 pi 时注入。
 	// 可为 nil（不注入角色）。
 	SystemPromptOf func(session string) string
+	// WorkDirOf 返回指定会话的工作目录，用于启动 pi 时设置 cmd.Dir。
+	// 可为 nil（用 feisuo 启动目录）。
+	WorkDirOf func(session string) string
 
 	mu      sync.Mutex
 	clients map[string]*rpcClient // session name -> 常驻进程
@@ -147,6 +152,9 @@ func (e *Engine) getClient(session string) *rpcClient {
 		prompts = append(prompts, bridgePrompt(e.SessionList()))
 	}
 	cfg.AppendSystemPrompt = strings.Join(prompts, "\n\n")
+	if e.WorkDirOf != nil {
+		cfg.WorkDir = strings.TrimSpace(e.WorkDirOf(session))
+	}
 	c, err := startRPC(context.Background(), cfg)
 	if err != nil {
 		log.Printf("[pi/%s] start rpc failed: %v", session, err)
@@ -297,5 +305,9 @@ func (e *Engine) SetSessionList(fn func() []string) { e.SessionList = fn }
 
 // SetSystemPromptOf 实现 engine.Engine 接口：注入会话角色提供者。
 func (e *Engine) SetSystemPromptOf(fn func(string) string) { e.SystemPromptOf = fn }
+
+// SetWorkDirOf 实现 engine.Engine 接口：注入会话工作目录提供者。
+func (e *Engine) SetWorkDirOf(fn func(string) string) { e.WorkDirOf = fn }
+
 // Export sanitizeSessionID for use by other packages
 func ExportSanitizeSessionID(name string) string { return sanitizeSessionID(name) }

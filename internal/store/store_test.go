@@ -8,6 +8,21 @@ import (
 	"feisuo/internal/session"
 )
 
+func TestSaveLoadWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	se := session.NewSession("repo")
+	se.WorkDir = "/data/codes/feisuo"
+	s.Save(se)
+	rec, ok := s.Load()["repo"]
+	if !ok || rec.WorkDir != "/data/codes/feisuo" {
+		t.Fatalf("work_dir 未持久化, got %+v", rec)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)

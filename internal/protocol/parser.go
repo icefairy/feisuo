@@ -10,6 +10,8 @@ type Command struct {
 	Session string
 	// Role 从 --role "..." 提取的系统提示词（NEW/ROLE 命令用）
 	Role string
+	// WorkDir 从 --dir "..." 提取的工作目录（NEW 命令用）
+	WorkDir string
 }
 
 const (
@@ -42,18 +44,19 @@ func (p *Parser) Parse(text string) Command {
 	}
 
 	switch cmd {
-	case "to":
-		// /TO <session> <message>
+	case "to", "cd":
+		// /TO <session> <message>  /  /CD <session> <path>
 		sParts := SplitTwo(arg)
 		session = sParts[0]
 		arg = sParts[1]
 		return Command{Type: CmdCommand, Cmd: cmd, Arg: arg, Session: session}
 
 	case "new", "list", "ls", "status", "kill", "reset", "stop", "compact", "name", "rename", "help", "role", "switch":
-		// 提取 --role "..."（NEW/ROLE 命令）
-		role := ""
-		arg = extractRole(arg, &role)
-		return Command{Type: CmdCommand, Cmd: cmd, Arg: arg, Role: role}
+		// 提取 --role "..." 与 --dir "..."（NEW 命令可同时带两者）
+		role, dir := "", ""
+		arg = extractFlag(arg, "role", &role)
+		arg = extractFlag(arg, "dir", &dir)
+		return Command{Type: CmdCommand, Cmd: cmd, Arg: arg, Role: role, WorkDir: dir}
 
 	default:
 		// 未知命令，当普通消息处理
@@ -61,15 +64,16 @@ func (p *Parser) Parse(text string) Command {
 	}
 }
 
-// extractRole 从参数中提取 --role "..." 或 --role "..."（支持单双引号、无引号到行尾）。
-// 找到后从 arg 中移除该段，返回剩余部分。
-func extractRole(arg string, role *string) string {
+// extractFlag 从参数中提取 --<flag> "..."（支持单双引号、无引号到行尾）。
+// 找到后从 arg 中移除该段，返回剩余部分。大小写不敏感。
+func extractFlag(arg, flag string, out *string) string {
 	lower := strings.ToLower(arg)
-	idx := strings.Index(lower, "--role")
+	needle := "--" + strings.ToLower(flag)
+	idx := strings.Index(lower, needle)
 	if idx < 0 {
 		return arg
 	}
-	rest := arg[idx+len("--role"):]
+	rest := arg[idx+len(needle):]
 	rest = strings.TrimLeft(rest, " \t")
 	if rest == "" {
 		return strings.TrimSpace(arg[:idx])
@@ -107,8 +111,8 @@ func extractRole(arg string, role *string) string {
 			rest = ""
 		}
 	}
-	*role = strings.TrimSpace(val)
-	// 移除 --role 段（连同引号），保留前后内容
+	*out = strings.TrimSpace(val)
+	// 移除该 flag 段（连同引号），保留前后内容
 	before := arg[:idx]
 	after := rest
 	return strings.TrimSpace(before + " " + after)

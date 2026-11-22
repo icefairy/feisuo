@@ -231,6 +231,9 @@ func main() {
 		if rec.SystemPrompt != "" {
 			sm.SetRole(name, rec.SystemPrompt)
 		}
+		if rec.WorkDir != "" {
+			sm.SetWorkDir(name, rec.WorkDir)
+		}
 		startLoop(name)
 		restored++
 		log.Printf("[restore] session %q restored (status=%s)", name, rec.Status)
@@ -241,7 +244,7 @@ func main() {
 
 	// 飞书 access token 刷新守护（单例，随主 ctx 生命周期）
 	go fc.RefreshTokenLoop(ctx)
-	err = fc.Start(ctx, func(ev feishu.Event) {		// 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
+	err = fc.Start(ctx, func(ev feishu.Event) { // 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
 		if ev.SenderID != "" && !authStore.IsAuthorized(ev.SenderID) {
 			first := authStore.RecordRequest(ev.SenderID)
 			log.Printf("[auth] unauthorized sender %q (first=%v) blocked: %q", ev.SenderID, first, ev.Message.Content)
@@ -269,7 +272,7 @@ func main() {
 			fmt.Printf("  引擎: pi（pi 自身默认配置）\n")
 		}
 	}
-	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> | /LIST | /STATUS | /KILL <名>\n")
+	fmt.Printf("  命令: /TO <会话> [<消息>] | /NEW <名> [--dir 路径] | /CD <会话> <路径> | /LIST | /STATUS | /KILL <名>\n")
 	fmt.Println("  Ctrl+C 退出")
 
 	go handleLocalInput(ctx, parser, sm, eng, fc, s, startLoop, cfg, cfg.Sessions.DefaultName)
@@ -292,10 +295,10 @@ func buildEngine(cfg config.Config, name string, sm *session.Manager) engine.Eng
 	switch name {
 	case "codebuddy", "cb":
 		e = codebuddy.New(codebuddy.Config{
-			Binary:   cfg.CodeBuddy.Binary,
-			Model:    cfg.CodeBuddy.Model,
-			APIKey:   cfg.CodeBuddy.APIKey,
-			Timeout:  derefTimeout(cfg.CodeBuddy.Timeout),
+			Binary:    cfg.CodeBuddy.Binary,
+			Model:     cfg.CodeBuddy.Model,
+			APIKey:    cfg.CodeBuddy.APIKey,
+			Timeout:   derefTimeout(cfg.CodeBuddy.Timeout),
 			SessionID: func(s string) string { return "feisuo-" + pi.ExportSanitizeSessionID(s) },
 		})
 	default:
@@ -309,6 +312,7 @@ func buildEngine(cfg config.Config, name string, sm *session.Manager) engine.Eng
 	}
 	e.SetSessionList(func() []string { return sm.List() })
 	e.SetSystemPromptOf(func(s string) string { return sm.Role(s) })
+	e.SetWorkDirOf(func(s string) string { return sm.WorkDir(s) })
 	return e
 }
 
@@ -317,6 +321,37 @@ func derefTimeout(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// resolveWorkDir 把用户输入的目录（支持 ~ 与相对路径）解析为存在的绝对路径。
+func resolveWorkDir(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", fmt.Errorf("目录为空")
+	}
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if dir == "~" {
+			dir = home
+		} else {
+			dir = filepath.Join(home, dir[2:])
+		}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%q 不是目录", abs)
+	}
+	return abs, nil
 }
 
 // startSessionLoop 每个会话的消费循环
@@ -485,19 +520,34 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 			fc.Reply(sender, "❌ /NEW <name> [--role \"描述\"] — 请指定会话名称")
 			return
 		}
+		var workDir string
+		if cmd.WorkDir != "" {
+			abs, err := resolveWorkDir(cmd.WorkDir)
+			if err != nil {
+				fc.Reply(sender, fmt.Sprintf("❌ 工作目录无效: %v", err))
+				return
+			}
+			workDir = abs
+		}
 		sm.Create(name)
 		if cmd.Role != "" {
 			sm.SetRole(name, cmd.Role)
+		}
+		if workDir != "" {
+			sm.SetWorkDir(name, workDir)
 		}
 		startLoop(name)
 		if se, ok := sm.Get(name); ok {
 			st.Save(se)
 		}
+		hint := ""
 		if cmd.Role != "" {
-			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`，角色: %s", name, cmd.Role))
-		} else {
-			fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`", name))
+			hint += "，角色: " + cmd.Role
 		}
+		if workDir != "" {
+			hint += "，工作目录: `" + workDir + "`"
+		}
+		fc.Reply(sender, fmt.Sprintf("✅ 已创建会话: `%s`%s", name, hint))
 
 	case "role":
 		// /ROLE <会话> [--role "描述"]  → 设置/查看会话角色
@@ -526,6 +576,41 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 				fc.Reply(sender, fmt.Sprintf("🎭 会话 `%s` 角色: %s", name, role))
 			}
 		}
+		return
+
+	case "cd":
+		// /CD <会话> <路径>：设置会话工作目录；不带路径则查看。
+		name := cmd.Session
+		if name == "" {
+			fc.Reply(sender, "❌ /CD <会话> <路径> — 设置会话工作目录（/CD <会话> 查看）")
+			return
+		}
+		if !sm.Exists(name) {
+			fc.Reply(sender, fmt.Sprintf("❌ 会话 `%s` 不存在，先 /NEW %s", name, name))
+			return
+		}
+		dir := strings.TrimSpace(cmd.Arg)
+		if dir == "" {
+			cur := sm.WorkDir(name)
+			if cur == "" {
+				fc.Reply(sender, fmt.Sprintf("📁 会话 `%s` 未设置工作目录（使用 feisuo 启动目录）", name))
+			} else {
+				fc.Reply(sender, fmt.Sprintf("📁 会话 `%s` 工作目录: `%s`", name, cur))
+			}
+			return
+		}
+		abs, err := resolveWorkDir(dir)
+		if err != nil {
+			fc.Reply(sender, fmt.Sprintf("❌ 工作目录无效: %v", err))
+			return
+		}
+		sm.SetWorkDir(name, abs)
+		// 工作目录在进程启动时生效，杀掉旧进程让下次消息用新目录重建。
+		eng.Kill(name)
+		if se, ok := sm.Get(name); ok {
+			st.Save(se)
+		}
+		fc.Reply(sender, fmt.Sprintf("📁 已设置会话 `%s` 工作目录: `%s`，下次消息生效", name, abs))
 		return
 
 	case "list", "ls", "status":
@@ -685,8 +770,9 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 	case "help":
 		fc.Reply(sender, `🤖 飞梭命令:
   /TO <会话> [<消息>]  切换到指定会话（可带消息直接发送）
-  /NEW <名称> [--role "描述"]  创建新会话（可带角色）
+  /NEW <名称> [--role "描述"] [--dir "路径"]  创建会话（可带角色/工作目录）
   /ROLE <会话> [--role "描述"] 设置/查看会话角色
+  /CD <会话> [<路径>]  设置/查看会话工作目录（CodeBuddy 在该目录做开发）
   /LIST               列出所有会话
   /STATUS             查看会话状态
   /KILL <会话>        终止会话（上下文保留，复活后恢复）
@@ -744,8 +830,8 @@ func handleLocalInput(ctx context.Context, parser *protocol.Parser, sm *session.
 
 // runAttachCmd 介入指定会话：实时显示收发 + stdin 输入。
 // 用法: feisuo attach <会话> [--as <飞书用户ID>]
-//  - 不传 --as：本地介入（Sender=local，回复只在本地显示）
-//  - 传 --as <ID>：双通道（回复同时发飞书该用户 + 本地显示）
+//   - 不传 --as：本地介入（Sender=local，回复只在本地显示）
+//   - 传 --as <ID>：双通道（回复同时发飞书该用户 + 本地显示）
 func runAttachCmd(args []string) {
 	var sessionName, asOpenID string
 	for i := 0; i < len(args); i++ {

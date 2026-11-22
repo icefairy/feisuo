@@ -4,6 +4,9 @@
 # 引擎与模型凭据复用 CLI 自身配置，feisuo 不需要 api_key/model：
 #   - pi 引擎：用 pi auth / models.json 中配置的默认 provider、模型与凭据
 #   - codebuddy 引擎：用本机登录凭据与默认模型
+#
+# 会话工作目录不在此配置：每个会话用 /NEW <名> --dir <路径> 或 /CD <会话> <路径> 绑定，
+# 绑定后对应 Agent 进程在该目录内开发；未绑定的会话用 feisuo 启动目录。
 
 # 引擎选择：pi | codebuddy（默认 pi，向后兼容）
 engine: "pi"

@@ -26,14 +26,15 @@ func (s *Store) Save(se *session.Session) {
 	defer s.mu.Unlock()
 
 	data, err := json.MarshalIndent(map[string]interface{}{
-		"name":       se.Name,
-		"status":     se.Status,
-		"message":    se.Message,
+		"name":          se.Name,
+		"status":        se.Status,
+		"message":       se.Message,
 		"system_prompt": se.SystemPrompt,
-		"started_at": se.StartedAt.Format("2006-01-02 15:04:05"),
-		"stopped_at": se.StoppedAt,
-		"error":      se.Err,
-		"updated_at": time.Now().Format("2006-01-02T15:04:05"),
+		"work_dir":      se.WorkDir,
+		"started_at":    se.StartedAt.Format("2006-01-02 15:04:05"),
+		"stopped_at":    se.StoppedAt,
+		"error":         se.Err,
+		"updated_at":    time.Now().Format("2006-01-02T15:04:05"),
 	}, "", "  ")
 	if err != nil {
 		return
@@ -46,14 +47,15 @@ func (s *Store) Close() {}
 
 // Record 一条已持久化的会话元数据
 type Record struct {
-	Name      string  `json:"name"`
-	Status    string  `json:"status"`
-	Message   string  `json:"message"`
-	SystemPrompt string `json:"system_prompt"`
-	StartedAt string  `json:"started_at"`
-	StoppedAt *string `json:"stopped_at"`
-	Error     string  `json:"error"`
-	UpdatedAt string  `json:"updated_at"`
+	Name         string  `json:"name"`
+	Status       string  `json:"status"`
+	Message      string  `json:"message"`
+	SystemPrompt string  `json:"system_prompt"`
+	WorkDir      string  `json:"work_dir"`
+	StartedAt    string  `json:"started_at"`
+	StoppedAt    *string `json:"stopped_at"`
+	Error        string  `json:"error"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
 // Load 读取目录下所有已持久化的会话记录（用于重启后恢复）。

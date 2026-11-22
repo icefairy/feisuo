@@ -108,3 +108,9 @@ func (s *engineSwitcher) SetSystemPromptOf(fn func(string) string) {
 		e.SetSystemPromptOf(fn)
 	}
 }
+
+func (s *engineSwitcher) SetWorkDirOf(fn func(string) string) {
+	if e := s.get(); e != nil {
+		e.SetWorkDirOf(fn)
+	}
+}

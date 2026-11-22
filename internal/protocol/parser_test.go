@@ -44,6 +44,34 @@ func TestParseRoleNoQuote(t *testing.T) {
 	}
 }
 
+func TestParseNewDir(t *testing.T) {
+	c := New().Parse(`/NEW repo --dir /data/codes/feisuo`)
+	if c.Cmd != "new" || c.Arg != "repo" || c.WorkDir != "/data/codes/feisuo" {
+		t.Errorf("got cmd=%s arg=%q dir=%q", c.Cmd, c.Arg, c.WorkDir)
+	}
+}
+
+func TestParseNewRoleAndDir(t *testing.T) {
+	c := New().Parse(`/NEW repo --role "代码审查" --dir "/data/codes/my repo"`)
+	if c.Cmd != "new" || c.Arg != "repo" || c.Role != "代码审查" || c.WorkDir != "/data/codes/my repo" {
+		t.Errorf("got cmd=%s arg=%q role=%q dir=%q", c.Cmd, c.Arg, c.Role, c.WorkDir)
+	}
+}
+
+func TestParseCD(t *testing.T) {
+	c := New().Parse(`/CD repo /data/codes/feisuo`)
+	if c.Cmd != "cd" || c.Session != "repo" || c.Arg != "/data/codes/feisuo" {
+		t.Errorf("got cmd=%s session=%q arg=%q", c.Cmd, c.Session, c.Arg)
+	}
+}
+
+func TestParseCDViewOnly(t *testing.T) {
+	c := New().Parse(`/CD repo`)
+	if c.Cmd != "cd" || c.Session != "repo" || c.Arg != "" {
+		t.Errorf("got cmd=%s session=%q arg=%q", c.Cmd, c.Session, c.Arg)
+	}
+}
+
 func TestParseToUnaffected(t *testing.T) {
 	c := New().Parse(`/TO ice 帮我看看 --role 不是角色`)
 	if c.Cmd != "to" || c.Session != "ice" || c.Role != "" {

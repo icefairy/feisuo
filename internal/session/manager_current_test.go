@@ -2,6 +2,31 @@ package session
 
 import "testing"
 
+// TestWorkDirPerSession：工作目录按会话保存，互不影响
+func TestWorkDirPerSession(t *testing.T) {
+	m := New()
+	m.Create("repo")
+	m.Create("ops")
+	if got := m.WorkDir("repo"); got != "" {
+		t.Fatalf("新建会话工作目录应为空, got %q", got)
+	}
+	if !m.SetWorkDir("repo", "/data/codes/feisuo") {
+		t.Fatal("SetWorkDir 应成功")
+	}
+	if got := m.WorkDir("repo"); got != "/data/codes/feisuo" {
+		t.Fatalf("工作目录读回不一致, got %q", got)
+	}
+	if got := m.WorkDir("ops"); got != "" {
+		t.Fatalf("其他会话不应受影响, got %q", got)
+	}
+	if got := m.WorkDir("missing"); got != "" {
+		t.Fatalf("不存在的会话应返回空, got %q", got)
+	}
+	if m.SetWorkDir("missing", "/tmp") {
+		t.Fatal("不存在的会话 SetWorkDir 应失败")
+	}
+}
+
 // TestCurrentFallback：未 /TO 切换时普通消息发默认会话
 func TestCurrentFallback(t *testing.T) {
 	m := New()

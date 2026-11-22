@@ -26,10 +26,10 @@ import (
 
 // Config 是 codebuddy 引擎的配置。
 type Config struct {
-	Binary   string // "codebuddy"
-	Model    string // 如 "deepseek-v4.1-flash"
-	APIKey   string // 非空时设置为 CODEBUDDY_API_KEY 环境变量
-	Timeout  int    // 单任务超时（秒）；0=不超时；nil 配置时默认 1800
+	Binary    string // "codebuddy"
+	Model     string // 如 "deepseek-v4.1-flash"
+	APIKey    string // 非空时设置为 CODEBUDDY_API_KEY 环境变量
+	Timeout   int    // 单任务超时（秒）；0=不超时；nil 配置时默认 1800
 	SessionID func(session string) string
 	// AppendSystemPrompt 基础追加 system prompt，可空。
 	// 会话角色与 bridge 协议在进程启动时由 provider 动态拼接（见 appendSystemPrompt）。
@@ -48,6 +48,9 @@ type Engine struct {
 	// 可为 nil（不注入角色）。/ROLE 修改后 main 会 Kill 该会话进程，
 	// 下次消息拉起新进程即生效（与 pi 引擎行为一致）。
 	systemPromptOfFn func(session string) string
+	// workDirOf 返回指定会话的工作目录，进程启动时设为 cmd.Dir。
+	// 可为 nil（用 feisuo 启动目录）。/CD 修改后 main 会 Kill 该会话进程。
+	workDirOfFn func(session string) string
 
 	mu      sync.Mutex
 	clients map[string]*rpcClient
@@ -193,6 +196,33 @@ func (e *Engine) SetSystemPromptOf(fn func(string) string) {
 	e.systemPromptOfFn = fn
 }
 
+// SetWorkDirOf 实现 engine.Engine 接口：注入会话工作目录提供者。
+func (e *Engine) SetWorkDirOf(fn func(string) string) {
+	e.workDirOfFn = fn
+}
+
+// workDirOf 返回会话工作目录（空表示用默认目录）。
+func (e *Engine) workDirOf(session string) string {
+	if e.workDirOfFn == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.workDirOfFn(session))
+}
+
+// applyWorkDir 把会话工作目录设到进程上；目录不存在则保持默认并记日志。
+func (e *Engine) applyWorkDir(cmd *exec.Cmd, session string) {
+	dir := e.workDirOf(session)
+	if dir == "" {
+		return
+	}
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		cmd.Dir = dir
+		log.Printf("[cb/%s] work dir: %s", session, dir)
+	} else {
+		log.Printf("[cb/%s] work dir %q not accessible, using default", session, dir)
+	}
+}
+
 // runPrompt 内部方法：启动（或复用）进程，发送 prompt，等待 result。
 func (e *Engine) runPrompt(ctx context.Context, session, prompt string, steer bool,
 	onChunk func(string), onDone func(string, error)) {
@@ -253,6 +283,8 @@ func (e *Engine) getClient(session string) *rpcClient {
 	}
 
 	cmd := exec.CommandContext(context.Background(), binary, args...)
+	// 会话工作目录：让 codebuddy 在目标仓库内读写文件、运行命令。
+	e.applyWorkDir(cmd, session)
 	// 环境基于 os.Environ()（保留 PATH/HOME 等，codebuddy 需要 HOME 找 ~/.codebuddy 凭据）。
 	// CODEBUDDY_IS_SANDBOX=1：full pass，HIGH/CRITICAL 也不再询问。
 	// feisuo 是 supervisor 托管的无人值守网关，审批弹窗无法交互、会挂死会话，
@@ -282,11 +314,11 @@ func (e *Engine) getClient(session string) *rpcClient {
 	}
 
 	c := &rpcClient{
-		cmd:      cmd,
-		stdin:    bufio.NewWriter(stdin),
-		events:   make(chan map[string]any, 256),
-		pending:  make(map[string]*pendingPrompt),
-		shutdown: make(chan struct{}),
+		cmd:       cmd,
+		stdin:     bufio.NewWriter(stdin),
+		events:    make(chan map[string]any, 256),
+		pending:   make(map[string]*pendingPrompt),
+		shutdown:  make(chan struct{}),
 		sessionID: sessionID,
 	}
 
@@ -381,10 +413,10 @@ type pendingPrompt struct {
 	onDone     func(string, error)
 	buf        strings.Builder
 	timer      *time.Timer
-	hasText    bool // 启动竞态检测：是否收到过 assistant text
-	retries    int  // 启动重试次数（最多 1 次）
+	hasText    bool   // 启动竞态检测：是否收到过 assistant text
+	retries    int    // 启动重试次数（最多 1 次）
 	promptText string // 原始 prompt，用于启动竞态自动重试
-	hasDelta   bool // 是否收到过 stream_event text_delta（避免 assistant 完整块与 delta 重复追加）
+	hasDelta   bool   // 是否收到过 stream_event text_delta（避免 assistant 完整块与 delta 重复追加）
 }
 
 func (c *rpcClient) dispatchLoop() {
@@ -408,7 +440,7 @@ func (c *rpcClient) handleEvent(ev map[string]any) {
 		if !ok {
 			return
 		}
-	eventType, _ := evData["type"].(string)
+		eventType, _ := evData["type"].(string)
 		if eventType != "content_block_delta" {
 			return
 		}
@@ -642,7 +674,7 @@ func (c *rpcClient) sendControl(reqType string) error {
 		return fmt.Errorf("codebuddy rpc process not running")
 	}
 	b, err := json.Marshal(map[string]any{
-		"type": "control_request",
+		"type":       "control_request",
 		"request_id": fmt.Sprintf("cb-%d", time.Now().UnixNano()),
 		"request": map[string]any{
 			"subtype": reqType,

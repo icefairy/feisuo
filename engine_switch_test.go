@@ -30,17 +30,18 @@ func (f *fakeEngine) ExecuteSteer(ctx context.Context, session, prompt string, o
 }
 func (f *fakeEngine) Steer(session, msg string) error { return nil }
 func (f *fakeEngine) Abort(session string) error      { return nil }
-func (f *fakeEngine) Reset(session string) error       { return nil }
-func (f *fakeEngine) Kill(session string)              {}
+func (f *fakeEngine) Reset(session string) error      { return nil }
+func (f *fakeEngine) Kill(session string)             {}
 func (f *fakeEngine) Close() {
 	f.mu.Lock()
 	f.closed = true
 	f.mu.Unlock()
 }
-func (f *fakeEngine) SessionCount() int { return 0 }
-func (f *fakeEngine) SetSessionList(fn func() []string)   {}
+func (f *fakeEngine) SessionCount() int                        { return 0 }
+func (f *fakeEngine) SetSessionList(fn func() []string)        {}
 func (f *fakeEngine) SetSystemPromptOf(fn func(string) string) {}
-func (f *fakeEngine) asEngine() engine.Engine { return f }
+func (f *fakeEngine) SetWorkDirOf(fn func(string) string)      {}
+func (f *fakeEngine) asEngine() engine.Engine                  { return f }
 
 func TestEngineSwitcherSwapClosesOld(t *testing.T) {
 	old := &fakeEngine{name: "old"}

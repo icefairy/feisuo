@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -20,12 +21,12 @@ type rpcClient struct {
 	stdin  *bufio.Writer
 	events chan map[string]any // 事件流（buffered，reader 常驻消费）
 
-	mu       sync.Mutex
-	pending  map[string]*pendingPrompt // id -> 进行中的 prompt
-	pendingOrder []string              // FIFO：插入顺序，agent_settled 只完成最早一个
-	closed   bool
-	shutdown chan struct{}
-	lastErr  string
+	mu           sync.Mutex
+	pending      map[string]*pendingPrompt // id -> 进行中的 prompt
+	pendingOrder []string                  // FIFO：插入顺序，agent_settled 只完成最早一个
+	closed       bool
+	shutdown     chan struct{}
+	lastErr      string
 }
 
 type pendingPrompt struct {
@@ -76,6 +77,14 @@ func startRPC(ctx context.Context, cfg Config) (*rpcClient, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
+	if cfg.WorkDir != "" {
+		if fi, err := os.Stat(cfg.WorkDir); err == nil && fi.IsDir() {
+			cmd.Dir = cfg.WorkDir
+			log.Printf("[pi-rpc] work dir: %s", cfg.WorkDir)
+		} else {
+			log.Printf("[pi-rpc] work dir %q not accessible, using default", cfg.WorkDir)
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
@@ -315,8 +324,8 @@ func (c *rpcClient) prompt(ctx context.Context, id, msg string, steer bool, onCh
 		streamingBehavior = "steer"
 	}
 	cmd := map[string]any{
-		"id":   id,
-		"type": "prompt",
+		"id":      id,
+		"type":    "prompt",
 		"message": msg,
 		// 使用 pi 原生队列：当前 agent 忙时 followUp 排队，完成后依次处理；
 		// steer 则打断当前任务立即处理这条消息。不自己串行（doneCh），避免与 pi 队列冲突/重复实现。
