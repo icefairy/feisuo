@@ -152,6 +152,22 @@ func (m *Manager) WorkDir(name string) string {
 	return s.WorkDir
 }
 
+// AnyBusy 返回是否存在正在执行或还有待处理消息的会话。
+// 供 WS 健康检查避让：长任务期间没有入站飞书事件，不能误判为 WS 僵死而重启进程。
+func (m *Manager) AnyBusy() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.sessions {
+		s.mu.Lock()
+		busy := s.Status == "busy" || (s.Queue != nil && len(s.Queue) > 0)
+		s.mu.Unlock()
+		if busy {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) Exists(name string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

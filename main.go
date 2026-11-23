@@ -174,6 +174,8 @@ func main() {
 		WsURL:           cfg.Feishu.WsURL,
 		WSHealthTimeout: time.Duration(cfg.Feishu.WSHealthTimeout) * time.Second,
 		Shutdown:        cancel,
+		// 有会话执行中/排队时不触发 WS 僵死自愈，避免长任务被误杀。
+		IsBusy: func() bool { return sm.AnyBusy() },
 	})
 
 	parser := protocol.New()

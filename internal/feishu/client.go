@@ -26,6 +26,9 @@ type Config struct {
 	WsURL           string
 	WSHealthTimeout time.Duration // WS 健康检查阈值；0=禁用
 	Shutdown        func()        // 触发进程优雅退出（main 注入 cancel），用于 WS 僵死自愈
+	// IsBusy 可选：返回是否有会话正在执行/排队。为 true 时健康检查不触发退出，
+	// 避免长任务（>阈值期间无入站事件）被误判为 WS 僵死而中断。
+	IsBusy func() bool
 }
 
 // 包级 URL 变量：生产用默认飞书端点，测试可注入 mock server
@@ -59,6 +62,7 @@ type Client struct {
 	wsLastEvent time.Time
 	wsDeadline  time.Duration
 	shutdown    func()
+	isBusy      func() bool
 }
 
 func New(cfg Config) *Client {
@@ -68,6 +72,7 @@ func New(cfg Config) *Client {
 		streams:    make(map[string]*streamState),
 		wsDeadline: cfg.WSHealthTimeout,
 		shutdown:   cfg.Shutdown,
+		isBusy:     cfg.IsBusy,
 	}
 }
 
@@ -907,6 +912,12 @@ func (c *Client) wsWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// 有会话正在执行或排队时不判定 WS 僵死：长任务期间不会有入站事件，
+			// 否则会被误杀。此时刷新活跃时间，任务结束后重新计一个新窗口。
+			if c.isBusy != nil && c.isBusy() {
+				c.markAlive()
+				continue
+			}
 			if c.wsIsDead() {
 				log.Printf("[feishu] WS 健康检查失败：已 %v 未收到任何飞书事件（阈值 %v），触发进程优雅退出以重建连接",
 					c.lastEventAge().Round(time.Second), c.wsDeadline.Round(time.Second))

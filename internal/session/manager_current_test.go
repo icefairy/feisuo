@@ -27,6 +27,30 @@ func TestWorkDirPerSession(t *testing.T) {
 	}
 }
 
+// TestAnyBusy：执行中或队列非空算忙；空闲且有消费循环时不误判
+func TestAnyBusy(t *testing.T) {
+	m := New()
+	m.Create("a")
+	if m.AnyBusy() {
+		t.Fatal("空闲空队列不应为 busy")
+	}
+	m.SetStatus("a", "busy")
+	if !m.AnyBusy() {
+		t.Fatal("busy 状态应识别为忙")
+	}
+	m.SetStatus("a", "idle")
+	m.Enqueue("a", Message{Content: "queued"})
+	if !m.AnyBusy() {
+		t.Fatal("队列有待处理消息应识别为忙")
+	}
+	if se, ok := m.Get("a"); ok {
+		<-se.QueueChan()
+	}
+	if m.AnyBusy() {
+		t.Fatal("队列取空且 idle 后不应为 busy")
+	}
+}
+
 // TestCurrentFallback：未 /TO 切换时普通消息发默认会话
 func TestCurrentFallback(t *testing.T) {
 	m := New()
