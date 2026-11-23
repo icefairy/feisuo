@@ -159,13 +159,7 @@ func main() {
 	}
 
 	// 引擎选择：优先用 /switch 运行时持久化的选择，否则 yaml 的 engine（默认 pi）
-	chosenEngine := config.LoadEngineChoice(cfg.Sessions.DataDir)
-	if chosenEngine == "" {
-		chosenEngine = cfg.Engine
-	}
-	if chosenEngine != "codebuddy" && chosenEngine != "cb" {
-		chosenEngine = "pi"
-	}
+	chosenEngine := currentEngineName(cfg)
 
 	eng := newEngineSwitcher(buildEngine(cfg, chosenEngine, sm))
 	defer eng.Close()
@@ -259,15 +253,16 @@ func main() {
 
 	fmt.Printf("飞梭 feisuo 启动\n")
 	fmt.Printf("  飞书: %s | 默认会话: %s\n", cfg.Feishu.BotName, cfg.Sessions.DefaultName)
+	effectiveModel := currentModel(cfg, chosenEngine)
 	if chosenEngine == "codebuddy" || chosenEngine == "cb" {
-		model := cfg.CodeBuddy.Model
+		model := effectiveModel
 		if model == "" {
 			model = "codebuddy 默认模型"
 		}
 		fmt.Printf("  引擎: CodeBuddy（%s）\n", model)
 	} else {
-		if cfg.Pi.Model != "" || cfg.Pi.Provider != "" {
-			fmt.Printf("  引擎: pi（provider=%s model=%s）\n", cfg.Pi.Provider, cfg.Pi.Model)
+		if effectiveModel != "" || cfg.Pi.Provider != "" {
+			fmt.Printf("  引擎: pi（provider=%s model=%s）\n", cfg.Pi.Provider, effectiveModel)
 		} else {
 			fmt.Printf("  引擎: pi（pi 自身默认配置）\n")
 		}
@@ -288,9 +283,43 @@ func main() {
 	cancel()
 }
 
+// currentEngineName 返回当前生效引擎名：优先读 /switch 持久化的 engine.choice，
+// 否则用 yaml 的 engine，最后做白名单归一（非 codebuddy/cb 归 pi）。
+// 启动处与 /MODEL 命令共用，保证"当前引擎"只有 engine.choice 一个真相源。
+func currentEngineName(cfg config.Config) string {
+	name := config.LoadEngineChoice(cfg.Sessions.DataDir)
+	if name == "" {
+		name = cfg.Engine
+	}
+	if name != "codebuddy" && name != "cb" {
+		name = "pi"
+	}
+	return name
+}
+
+// currentModel 返回当前生效模型：优先读 /MODEL 持久化的 model.choice，
+// 否则用对应引擎在 yaml 里的 model（空串表示引擎自身默认）。
+func currentModel(cfg config.Config, engineName string) string {
+	if m := config.LoadModelChoice(cfg.Sessions.DataDir); m != "" {
+		return m
+	}
+	if engineName == "codebuddy" || engineName == "cb" {
+		return cfg.CodeBuddy.Model
+	}
+	return cfg.Pi.Model
+}
+
 // buildEngine 按引擎名创建引擎实例，并注入会话列表/角色 provider。
 // /switch 命令与启动时共用，保证交互切换与初始启动行为一致。
+// /MODEL 持久化的模型在此统一覆盖，启动、/switch、/MODEL 三处入口共用。
 func buildEngine(cfg config.Config, name string, sm *session.Manager) engine.Engine {
+	if model := config.LoadModelChoice(cfg.Sessions.DataDir); model != "" {
+		if name == "codebuddy" || name == "cb" {
+			cfg.CodeBuddy.Model = model
+		} else {
+			cfg.Pi.Model = model
+		}
+	}
 	var e engine.Engine
 	switch name {
 	case "codebuddy", "cb":
@@ -767,6 +796,42 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
 		_ = config.SaveEngineChoice(cfg.Sessions.DataDir, target)
 		fc.Reply(sender, fmt.Sprintf("🔁 已切换到引擎: %s（立即生效，重启后保留）", target))
 
+	case "model":
+		// /MODEL：查看/设置全局模型（立即生效并持久化）。模型名不做白名单，TrimSpace 后原样使用。
+		arg := strings.TrimSpace(cmd.Arg)
+		engineName := currentEngineName(cfg)
+		if arg == "" {
+			m := currentModel(cfg, engineName)
+			source := "配置文件"
+			if config.LoadModelChoice(cfg.Sessions.DataDir) != "" {
+				source = "/MODEL 设置"
+			}
+			if m == "" {
+				fc.Reply(sender, fmt.Sprintf("🎯 当前引擎 `%s` 使用自身默认模型（%s）", engineName, source))
+			} else {
+				fc.Reply(sender, fmt.Sprintf("🎯 当前模型: `%s`（引擎 %s，来源: %s）", m, engineName, source))
+			}
+			return
+		}
+		// reset/default：清除持久化，回退 yaml 默认
+		if arg == "reset" || arg == "default" {
+			writeErr := config.SaveModelChoice(cfg.Sessions.DataDir, "")
+			eng.swap(buildEngine(cfg, engineName, sm))
+			hint := ""
+			if writeErr != nil {
+				hint = fmt.Sprintf("（⚠️ 持久化失败，重启后可能不保留: %v）", writeErr)
+			}
+			fc.Reply(sender, fmt.Sprintf("🔄 已恢复配置文件默认模型%s；引擎已重建，正在进行的任务会中断，上下文按原会话恢复", hint))
+			return
+		}
+		writeErr := config.SaveModelChoice(cfg.Sessions.DataDir, arg)
+		eng.swap(buildEngine(cfg, engineName, sm))
+		hint := ""
+		if writeErr != nil {
+			hint = fmt.Sprintf("（⚠️ 持久化失败，重启后可能不保留: %v）", writeErr)
+		}
+		fc.Reply(sender, fmt.Sprintf("✅ 已切换模型: `%s`（立即生效，重启后保留）%s；引擎已重建，正在进行的任务会中断，上下文按原会话恢复。模型名请勿含 --role/--dir", arg, hint))
+
 	case "help":
 		fc.Reply(sender, `🤖 飞梭命令:
   /TO <会话> [<消息>]  切换到指定会话（可带消息直接发送）
@@ -781,6 +846,7 @@ func handleCommand(ctx context.Context, cmd protocol.Command, fc *feishu.Client,
   /COMPACT <会话>     压缩会话上下文（透传 pi /compact：保留关键信息降 token）
   /NAME <旧> <新>     重命名会话
   /SWITCH <pi|codebuddy>  运行时切换执行引擎（立即生效）
+  /MODEL [<名称>|reset]  查看/设置全局模型（立即生效，重启后保留）
   普通消息            发给当前会话（/TO 切换后发往新会话）`)
 
 	default:

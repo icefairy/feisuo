@@ -9,11 +9,11 @@ import (
 )
 
 type Config struct {
-	Feishu    FeishuConfig  `yaml:"feishu"`
-	Engine    string        `yaml:"engine"`     // "pi" | "codebuddy"，默认 pi
-	Pi        PiConfig      `yaml:"pi"`
+	Feishu    FeishuConfig    `yaml:"feishu"`
+	Engine    string          `yaml:"engine"` // "pi" | "codebuddy"，默认 pi
+	Pi        PiConfig        `yaml:"pi"`
 	CodeBuddy CodeBuddyConfig `yaml:"codebuddy"`
-	Sessions  SessionConfig `yaml:"sessions"`
+	Sessions  SessionConfig   `yaml:"sessions"`
 }
 
 type FeishuConfig struct {
@@ -44,7 +44,7 @@ type CodeBuddyConfig struct {
 }
 
 type SessionConfig struct {
-	DataDir    string `yaml:"data_dir"`
+	DataDir     string `yaml:"data_dir"`
 	DefaultName string `yaml:"default_name"`
 }
 
@@ -126,6 +126,31 @@ func LoadEngineChoice(dataDir string) string {
 		return ""
 	}
 	b, err := os.ReadFile(filepath.Join(expandHome(dataDir), "engine.choice"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// SaveModelChoice 记录 /MODEL 运行时设置的模型（空串表示清除、回退 yaml 默认），重启后保留。
+// 文件名不带 .json 后缀，避免被 store.Load 当作会话记录解析。
+func SaveModelChoice(dataDir, model string) error {
+	if dataDir == "" {
+		return nil
+	}
+	dir := expandHome(dataDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "model.choice"), []byte(strings.TrimSpace(model)), 0644)
+}
+
+// LoadModelChoice 读取 /MODEL 持久化的模型；无记录或空记录返回空串（表示用 yaml 默认）。
+func LoadModelChoice(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(expandHome(dataDir), "model.choice"))
 	if err != nil {
 		return ""
 	}

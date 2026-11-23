@@ -46,13 +46,13 @@ type Message struct {
 }
 
 type Client struct {
-	cfg       Config
-	httpCli   *http.Client
-	token     string
-	tokenExp  time.Time // token 过期时刻（飞书默认 2h）
-	tokenMu   sync.RWMutex
-	streams   map[string]*streamState // openID|session -> 流式状态
-	streamMu  sync.Mutex
+	cfg      Config
+	httpCli  *http.Client
+	token    string
+	tokenExp time.Time // token 过期时刻（飞书默认 2h）
+	tokenMu  sync.RWMutex
+	streams  map[string]*streamState // openID|session -> 流式状态
+	streamMu sync.Mutex
 
 	// WS 健康检查（应用层 alive 探测，根治 WS 半开僵死）
 	wsAliveMu   sync.Mutex
@@ -307,8 +307,9 @@ func (c *Client) SendChunk(openID, session, chunk string) {
 	}
 	prefix := fmt.Sprintf("⚡ [%s]", session)
 	content := prefix + " " + chunk
-	if len(content) > 1500 {
-		content = content[:1497] + "..."
+	// 按 rune 截断，避免切坏中文（其他路径都用 rune，这里原来按字节会出乱码）
+	if runes := []rune(content); len(runes) > 1500 {
+		content = string(runes[:1497]) + "..."
 	}
 	if err := c.Send(context.Background(), openID, content); err != nil {
 		log.Printf("[feishu] chunk send failed: %v", err)
@@ -323,7 +324,7 @@ func (c *Client) SendChunk(openID, session, chunk string) {
 //   - 完成时编辑最终完整答案
 
 const (
-	maxEditsPerMessage = 15  // 单条消息编辑预算（留余量给 20 次上限）
+	maxEditsPerMessage = 15   // 单条消息编辑预算（留余量给 20 次上限）
 	maxMsgRunes        = 2000 // 单条消息展示上限（字，cjk rune 数），超了拆条
 	streamEditInterval = 1500 * time.Millisecond
 	maxEditBackoff     = 10 * time.Second
@@ -331,20 +332,21 @@ const (
 )
 
 type streamState struct {
-	msgID        string    // 已发送的消息 ID，流式期间反复编辑它
-	openID       string    // 接收者 open_id（roll 新消息用，不能拿 session 名当 open_id！）
+	msgID        string // 已发送的消息 ID，流式期间反复编辑它
+	openID       string // 接收者 open_id（roll 新消息用，不能拿 session 名当 open_id！）
 	session      string
-	full         string    // 累积的完整文本（每次编辑发全文，保证前面的内容不丢）
-	sentLen      int       // 已发到飞书的 full 的 rune 长度（roll 新消息时只发增量，避免重复）
-	buf          string    // 待 flush 的增量（防抖用）
+	full         string // 累积的完整文本（每次编辑发全文，保证前面的内容不丢）
+	shown        string // 用户实际看到的文本（只在编辑/发送成功后更新；fallback 后停止更新，用于只补未看到的尾部）
+	sentLen      int    // 已发到飞书的 full 的 rune 长度（roll 新消息时只发增量，避免重复）
+	buf          string // 待 flush 的增量（防抖用）
 	dirty        bool
 	timer        *time.Timer
-	editCount    int       // 本条消息已编辑次数
+	editCount    int           // 本条消息已编辑次数
 	editInterval time.Duration // 当前编辑间隔（自适应退避）
-	floodStrikes int       // 连续编辑失败次数
-	lastEdit     time.Time // 上次编辑时间
-	fallback     bool      // fallback 模式：停止编辑，等最终结果直接发
-	local        bool      // 命令行介入模式：输出打印到 stdout，不调飞书 API
+	floodStrikes int           // 连续编辑失败次数
+	lastEdit     time.Time     // 上次编辑时间
+	fallback     bool          // fallback 模式：停止编辑，等最终结果直接发
+	local        bool          // 命令行介入模式：输出打印到 stdout，不调飞书 API
 }
 
 // StreamBegin 开始流式输出：发送"处理中"消息并记录 message_id。
@@ -464,6 +466,23 @@ func rollIncrement(full string, sentLen int) string {
 	return string(runes[sentLen:])
 }
 
+// continuationText 返回 final 中用户尚未看到的尾部（Hermes _continuation_text 同策略）：
+// 若 final 以 shown 开头，只补 shown 之后的增量并去掉前导空白；否则（前缀对不上）发全文。
+// 用于 fallback / 编辑失败时，避免"⚡ 半成品 + ✅ 全文"大面积重复。
+func continuationText(shown, final string) string {
+	if shown == "" || !strings.HasPrefix(final, shown) {
+		return final
+	}
+	return strings.TrimLeft(final[len(shown):], " \t\n\r")
+}
+
+// rollPieces 返回 roll 时旧卡 finalize 文本与新卡增量：
+// 旧卡保持用户已看到的 shown（不提前刷成 full）；新卡只发 full 中 shown 之后的增量。
+// 这样首次 roll 不会出现"旧卡全文 + 新卡全文"完全重复。
+func rollPieces(full, shown string) (oldCard string, increment string) {
+	return shown, continuationText(shown, full)
+}
+
 // rollToNewMessageLocked 编辑预算耗尽：当前消息 finalize（不再编辑），
 // 开一条新消息记录后续增量，后续编辑指向新消息。调用方必须持有 streamMu。
 func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
@@ -474,18 +493,17 @@ func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
 		st.timer.Stop()
 		st.timer = nil
 	}
-	// 当前消息 finalize：编辑为当前全文（预算未到 20，还能编辑一次）
-	cur := prefix + st.full
+	// 当前消息 finalize：编辑为【用户已看到的内容】shown（不提前刷成 full）。
+	// 旧卡 finalize 成全文会让首次 roll 出现"两张卡都发全文"的重复。
+	oldCard, inc := rollPieces(st.full, st.shown)
+	cur := prefix + oldCard
 	go func() {
 		if err := c.EditMessage(msgID, cur); err != nil {
 			log.Printf("[feishu] roll finalize edit failed: %v", err)
 		}
 	}()
-	// 开新消息：只发自上次 roll 起的【增量】（rollIncrement），
-	// 不再重发已展示过的全文——避免长任务时同一内容在多张卡片重复。
+	// 开新消息：只发 full 中 shown 之后的增量，不再重发已展示过的全文。
 	// 用户如需完整上下文，往上翻看已 finalize 的旧卡片即可（Hermes 同策略）。
-	inc := rollIncrement(st.full, st.sentLen)
-	st.sentLen = len([]rune(st.full))
 	newContent := prefix + inc
 	newID, err := c.sendAndGetID(st.openID, newContent)
 	if err != nil {
@@ -496,6 +514,8 @@ func (c *Client) rollToNewMessageLocked(st *streamState, key string) {
 		st.dirty = false
 		return
 	}
+	st.sentLen = len([]rune(st.full))
+	st.shown = st.full // 新卡从增量开头到 full 的内容现已显示
 	st.msgID = newID
 	st.editCount = 0
 	st.floodStrikes = 0
@@ -522,12 +542,17 @@ func (c *Client) StreamEnd(openID, session, final string, success bool) {
 	}
 	if st == nil {
 		c.streamMu.Unlock()
-		// 没有活动流：直接发一条结果
+		// 没有活动流：直接发一条结果。
+		// 不能用 SendChunk——它会自动加 ⚡ 前缀，发出"⚡ [name] ✅ …"前缀错乱。
 		prefix := "✅"
 		if !success {
 			prefix = "❌"
 		}
-		c.SendChunk(openID, session, fmt.Sprintf("%s %s", prefix, final))
+		if openID == "local" {
+			fmt.Printf("\n%s [%s] %s\n", prefix, session, final)
+			return
+		}
+		c.Send(context.Background(), openID, fmt.Sprintf("%s [%s] %s", prefix, session, final))
 		return
 	}
 	wasFallback := st.fallback
@@ -536,7 +561,7 @@ func (c *Client) StreamEnd(openID, session, final string, success bool) {
 		st.timer = nil
 	}
 	msgID := st.msgID
-	full := st.full
+	shown := st.shown
 	delete(c.streams, key)
 	c.streamMu.Unlock()
 
@@ -544,18 +569,27 @@ func (c *Client) StreamEnd(openID, session, final string, success bool) {
 	if !success {
 		prefix = "❌"
 	}
-	content := fmt.Sprintf("%s [%s] %s", prefix, session, final)
+	// fallback / 编辑失败时：旧 ⚡ 消息停留在 shown（用户已看到的部分），
+	// 只补发 final 中未看到的尾部，不再重发完整 final 造成大面积重复（Hermes 同策略）。
+	fallbackSend := func() {
+		tail := continuationText(shown, final)
+		if tail == "" {
+			// 全部内容用户已看到：无需再发新消息
+			return
+		}
+		// tail 是用户未看到的部分（shown 为空时即完整 final）。
+		// 保留旧 ⚡ 半成品（它就是答案开头），新消息带结果前缀。
+		c.Send(context.Background(), openID, fmt.Sprintf("%s [%s] %s", prefix, session, tail))
+	}
 	if wasFallback {
-		// fallback 模式：直接发新消息（编辑旧消息大概率失败）
-		c.Send(context.Background(), openID, content)
+		fallbackSend()
 		return
 	}
+	content := fmt.Sprintf("%s [%s] %s", prefix, session, final)
 	if err := c.EditMessage(msgID, content); err != nil {
 		log.Printf("[feishu] stream end edit failed: %v (fallback send)", err)
-		c.Send(context.Background(), openID, content)
+		fallbackSend()
 	}
-	// 如果流式期间编辑过（full 非空），确保最终内容完整（含之前展示的全文）
-	_ = full
 }
 
 // flushStream 把累积全文编辑到已发送消息（不是增量——保证前面的内容不丢）。
@@ -585,11 +619,12 @@ func (c *Client) flushStream(key string) {
 		c.handleEditFailure(key, err)
 		return
 	}
-	// 成功：重置失败计数
+	// 成功：重置失败计数，并记录用户实际看到的文本（fallback 时据此只补尾部）
 	c.streamMu.Lock()
 	if st := c.streams[key]; st != nil {
 		st.floodStrikes = 0
 		st.editCount++
+		st.shown = full
 	}
 	c.streamMu.Unlock()
 }
@@ -597,8 +632,11 @@ func (c *Client) flushStream(key string) {
 // handleEditFailure 编辑失败处理：限流→退避；连续失败→fallback（等最终结果）
 func (c *Client) handleEditFailure(key string, err error) {
 	msg := err.Error()
+	// 230072 = 编辑次数超限，重试无效 → 不当作 flood 退避，交给下面的 fallback 分支。
+	// 99991400 / "request trigger frequency limit" 是官方真正的频控码（HTTP 429）。
 	isFlood := strings.Contains(msg, "flood") || strings.Contains(msg, "rate") ||
-		strings.Contains(msg, "retry") || strings.Contains(msg, "230072") ||
+		strings.Contains(msg, "retry") || strings.Contains(msg, "99991400") ||
+		strings.Contains(msg, "frequency limit") ||
 		strings.Contains(msg, "99991661") || strings.Contains(msg, "99991663")
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()

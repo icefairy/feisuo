@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseRoleNew(t *testing.T) {
 	c := New().Parse(`/NEW fanyi --role "你是资深中英翻译，风格简洁"`)
@@ -84,5 +87,23 @@ func TestParseToSwitchOnly(t *testing.T) {
 	c := New().Parse(`/TO work`)
 	if c.Cmd != "to" || c.Session != "work" || c.Arg != "" {
 		t.Errorf("got cmd=%s session=%q arg=%q", c.Cmd, c.Session, c.Arg)
+	}
+}
+
+func TestParseModel(t *testing.T) {
+	cases := []struct {
+		in, arg string
+	}{
+		{`/MODEL hy4flash`, "hy4flash"},
+		{`/MODEL`, ""},
+		{`/MODEL reset`, "reset"},
+		{`/MODEL   deepseek-v4.1-flash  `, "deepseek-v4.1-flash"},
+	}
+	for _, tc := range cases {
+		c := New().Parse(tc.in)
+		// parser 只做整体 trim，多空格会留下前导空格；命令处理处再 TrimSpace
+		if c.Cmd != "model" || strings.TrimSpace(c.Arg) != tc.arg {
+			t.Errorf("Parse(%q): got cmd=%q arg=%q, want cmd=model arg=%q", tc.in, c.Cmd, c.Arg, tc.arg)
+		}
 	}
 }

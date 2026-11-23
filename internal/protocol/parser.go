@@ -51,7 +51,7 @@ func (p *Parser) Parse(text string) Command {
 		arg = sParts[1]
 		return Command{Type: CmdCommand, Cmd: cmd, Arg: arg, Session: session}
 
-	case "new", "list", "ls", "status", "kill", "reset", "stop", "compact", "name", "rename", "help", "role", "switch":
+	case "new", "list", "ls", "status", "kill", "reset", "stop", "compact", "name", "rename", "help", "role", "switch", "model":
 		// 提取 --role "..." 与 --dir "..."（NEW 命令可同时带两者）
 		role, dir := "", ""
 		arg = extractFlag(arg, "role", &role)
