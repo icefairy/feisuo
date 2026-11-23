@@ -63,6 +63,14 @@ type Client struct {
 	wsDeadline  time.Duration
 	shutdown    func()
 	isBusy      func() bool
+
+	// WS 连接存活探测（C 方案）：基于「断连状态 + 断连时长」判活，而非「多久没事件」。
+	// 长任务期间飞书没有入站事件是正常现象，不能据此判死；只有连接真的断开且
+	// 超过阈值没恢复（larkws 自带重连失效）才触发重启。
+	wsConnMu      sync.Mutex
+	wsConnected   bool // 当前 WS 处于已连接状态
+	wsEverConn    bool // 曾经连接成功过（首次连上后为 true）
+	wsBrokenSince time.Time // 最近一次进入断连状态的时刻（连上后清零）
 }
 
 func New(cfg Config) *Client {
@@ -840,17 +848,21 @@ func (c *Client) Start(ctx context.Context, handler func(Event)) error {
 	)
 	cli.SetOnReady(func() {
 		log.Printf("[feishu] WebSocket connected (long connection)")
+		c.wsMarkConnected()
 		c.markAlive()
 	})
 	cli.SetOnReconnecting(func() {
 		log.Printf("[feishu] WebSocket reconnecting...")
+		c.wsMarkBroken()
 	})
 	cli.SetOnReconnected(func() {
 		log.Printf("[feishu] WebSocket reconnected (long connection)")
+		c.wsMarkConnected()
 		c.markAlive()
 	})
 	cli.SetOnDisconnected(func() {
 		log.Printf("[feishu] WebSocket disconnected, will reconnect")
+		c.wsMarkBroken()
 	})
 	cli.SetOnError(func(err error) {
 		log.Printf("[feishu] ws error: %v", err)
@@ -890,12 +902,46 @@ func (c *Client) lastEventAge() time.Duration {
 	return time.Since(c.wsLastEvent)
 }
 
-// wsIsDead 判断 WS 是否疑似僵死：超过阈值未见任何事件。
+// wsIsDead 判断 WS 是否疑似僵死（C 方案）：连接已断开且超过阈值没恢复。
+// 只要连接处于已连接状态就返回 false——长任务期间没有入站事件是正常现象，
+// 不能据此判死（旧实现按 lastEventAge 判死，会把 10 分钟无消息的长任务误杀）。
+// 真正需要重启的只有一种：larkws 断连后其自带重连在阈值内都没恢复连接
+// （TCP 半开僵死 / 端点不可达），此时交给 supervisor 重建整个进程。
 func (c *Client) wsIsDead() bool {
 	if c.wsDeadline <= 0 {
 		return false
 	}
-	return c.lastEventAge() > c.wsDeadline
+	c.wsConnMu.Lock()
+	ever := c.wsEverConn
+	connected := c.wsConnected
+	broken := c.wsBrokenSince
+	c.wsConnMu.Unlock()
+	if !ever {
+		return false // 首次连接/重连进行中，交给 larkws 自己重试，不干预
+	}
+	if connected {
+		return false // 连接正常，不判死
+	}
+	return time.Since(broken) > c.wsDeadline
+}
+
+// wsMarkConnected 记录连接成功（首次 Ready 或重连成功）。
+func (c *Client) wsMarkConnected() {
+	c.wsConnMu.Lock()
+	c.wsConnected = true
+	c.wsEverConn = true
+	c.wsBrokenSince = time.Time{}
+	c.wsConnMu.Unlock()
+}
+
+// wsMarkBroken 记录进入断连状态（SDK 断开或开始重连，等待其自带重连恢复）。
+func (c *Client) wsMarkBroken() {
+	c.wsConnMu.Lock()
+	c.wsConnected = false
+	if c.wsEverConn {
+		c.wsBrokenSince = time.Now()
+	}
+	c.wsConnMu.Unlock()
 }
 
 // wsWatchdog 定时检查 WS 活性；疑似僵死则触发进程优雅退出，
@@ -904,7 +950,6 @@ func (c *Client) wsWatchdog(ctx context.Context) {
 	if c.wsDeadline <= 0 {
 		return
 	}
-	c.markAlive() // 初始化，避免启动前误触发
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -912,15 +957,12 @@ func (c *Client) wsWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 有会话正在执行或排队时不判定 WS 僵死：长任务期间不会有入站事件，
-			// 否则会被误杀。此时刷新活跃时间，任务结束后重新计一个新窗口。
-			if c.isBusy != nil && c.isBusy() {
-				c.markAlive()
-				continue
-			}
 			if c.wsIsDead() {
-				log.Printf("[feishu] WS 健康检查失败：已 %v 未收到任何飞书事件（阈值 %v），触发进程优雅退出以重建连接",
-					c.lastEventAge().Round(time.Second), c.wsDeadline.Round(time.Second))
+				c.wsConnMu.Lock()
+				broken := c.wsBrokenSince
+				c.wsConnMu.Unlock()
+				log.Printf("[feishu] WS 连接已断开 %v 未恢复（阈值 %v），larkws 自带重连失效，触发进程优雅退出以重建连接",
+					time.Since(broken).Round(time.Second), c.wsDeadline.Round(time.Second))
 				if c.shutdown != nil {
 					c.shutdown()
 				} else {
