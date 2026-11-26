@@ -46,6 +46,9 @@ type CodeBuddyConfig struct {
 type SessionConfig struct {
 	DataDir     string `yaml:"data_dir"`
 	DefaultName string `yaml:"default_name"`
+	// IdleTimeout 会话闲置回收阈值（秒）：超过该时长无活动则停掉该会话的常驻 CLI 进程，
+	// 下次收到消息自动重启（对话上下文按 session-id 恢复）。0 = 不回收。
+	IdleTimeout *int `yaml:"idle_timeout"`
 }
 
 func Load(path string) (Config, error) {
@@ -96,6 +99,11 @@ func applyDefaults(c *Config) {
 	}
 	if c.Sessions.DefaultName == "" {
 		c.Sessions.DefaultName = "main"
+	}
+	// 闲置回收默认 1 小时；显式 0 表示关闭
+	if c.Sessions.IdleTimeout == nil {
+		def := 3600
+		c.Sessions.IdleTimeout = &def
 	}
 }
 

@@ -238,6 +238,13 @@ func main() {
 		log.Printf("[restore] %d persistent session(s) restored", restored)
 	}
 
+	// 闲置回收守护：sessions.idle_timeout（默认 3600 秒）内无活动的会话
+	// 停掉其常驻 CLI 进程，释放资源；下次消息自动重启，上下文按 session-id 恢复。
+	if idleTimeout := derefTimeout(cfg.Sessions.IdleTimeout); idleTimeout > 0 {
+		go idleJanitor(ctx, sm, eng, time.Duration(idleTimeout)*time.Second)
+		log.Printf("[idle] idle reclamation enabled: %ds", idleTimeout)
+	}
+
 	// 飞书 access token 刷新守护（单例，随主 ctx 生命周期）
 	go fc.RefreshTokenLoop(ctx)
 	err = fc.Start(ctx, func(ev feishu.Event) { // 授权门卫：未授权用户拒绝一切操作，仅回复授权指引
@@ -385,6 +392,35 @@ func resolveWorkDir(dir string) (string, error) {
 	return abs, nil
 }
 
+// idleJanitor 闲置回收守护：定期扫描会话，闲置超过 timeout 且当前无任务时
+// 停掉该会话的常驻 CLI 进程（pi / codebuddy），释放内存与文件句柄。
+// 进程被停后会话状态不变，下次收到消息时引擎自动重启进程；
+// 对话上下文按确定的 session-id（feisuo-<会话名>）恢复，用户无感知。
+func idleJanitor(ctx context.Context, sm *session.Manager, eng *engineSwitcher, timeout time.Duration) {
+	interval := time.Minute
+	if timeout < interval {
+		interval = timeout
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, name := range sm.IdleSessions(timeout) {
+				log.Printf("[idle] session %q idle over %s, stopping cli process", name, timeout)
+				eng.Kill(name)
+				// 重置计时，避免进程已停但重复触发回收日志
+				sm.Touch(name)
+			}
+		}
+	}
+}
+
 // startSessionLoop 每个会话的消费循环
 func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng *engineSwitcher, fc *feishu.Client, st *store.Store, startLoop func(string), sockSrv *socket.Server) {
 	for {
@@ -439,6 +475,7 @@ func startSessionLoop(ctx context.Context, name string, sm *session.Manager, eng
 						}
 					},
 					func(final string, err error) {
+						sm.Touch(name) // 完成任务：重置闲置计时
 						if err != nil {
 							sm.SetStatus(name, "error")
 							se.Err = err.Error()

@@ -21,6 +21,7 @@
 - **本地交互**：终端 `feisuo>` 提示符可直接发任务，命令语法与飞书一致
 - **会话介入（attach）**：`feisuo attach <会话>` 把终端挂到任意会话，实时看收发、可手动输入（tmux/多终端并行介入多会话）
 - **会话状态**：idle / busy / done / error / stopped 五态，`/STATUS` 一览
+- **闲置回收**：会话闲置超过 `sessions.idle_timeout`（默认 1 小时）自动停掉其常驻 CLI 进程释放资源，下次消息自动重启且上下文不丢
 - **跨平台**：Linux / Windows 双平台二进制（Windows 用本地 TCP 替代 Unix socket）
 - **零依赖部署**：单二进制 + yaml 配置，supervisor 托管
 
@@ -60,6 +61,7 @@ codebuddy:             # engine: codebuddy 时使用；本机登录凭据，无�
 sessions:
   data_dir: "~/.feisuo/sessions" # 会话状态 + 授权列表存储
   default_name: "main"           # 默认会话名
+  idle_timeout: 3600             # 闲置回收（秒）：无活动超时则停掉该会话常驻 CLI 进程，下次消息自动重启；0=关闭
 ```
 
 > 模型与凭据**不在飞梭配置**：pi 引擎复用 `pi auth` / models.json 的配置，codebuddy 引擎复用本机登录凭据。codebuddy 引擎以 headless 权限全通过模式运行（无人值守不弹审批）。

@@ -31,15 +31,19 @@ type Session struct {
 	SystemPrompt string // 会话角色/系统提示词（可空）
 	WorkDir      string // 会话工作目录（绝对路径，可空=用 feisuo 启动目录）
 	LastSender   string // 最后活跃的飞书用户（attach 介入时用此 ID 发送回复）
+	// LastActiveAt 最后活跃时间（消息入队或任务完成时更新）。
+	// 供闲置回收：超过阈值且非 busy 的会话会停掉其常驻 CLI 进程以释放资源。
+	LastActiveAt time.Time
 	mu           sync.Mutex
 }
 
 func NewSession(name string) *Session {
 	return &Session{
-		Name:      name,
-		Status:    "idle",
-		Queue:     make(chan Message, 100), // 增大队列容量，防止排队满丢消息
-		StartedAt: time.Now(),
+		Name:         name,
+		Status:       "idle",
+		Queue:        make(chan Message, 100), // 增大队列容量，防止排队满丢消息
+		StartedAt:    time.Now(),
+		LastActiveAt: time.Now(),
 	}
 }
 
@@ -197,6 +201,9 @@ func (m *Manager) Enqueue(name string, msg Message) bool {
 
 	select {
 	case s.Queue <- msg:
+		s.mu.Lock()
+		s.LastActiveAt = time.Now()
+		s.mu.Unlock()
 		return true
 	default:
 		return false
@@ -338,6 +345,42 @@ func (m *Manager) GetLastSender(name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.LastSender
+}
+
+// Touch 更新会话最后活跃时间（消息入队、任务完成时调用）。
+func (m *Manager) Touch(name string) {
+	m.mu.RLock()
+	s, ok := m.sessions[name]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	s.LastActiveAt = time.Now()
+	s.mu.Unlock()
+}
+
+// IdleSessions 返回闲置超过 timeout 的会话名。
+// 只回收当前无任务（非 busy、队列为空、未 stopped）的会话，避免打断正在执行的任务。
+func (m *Manager) IdleSessions(timeout time.Duration) []string {
+	if timeout <= 0 {
+		return nil
+	}
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var names []string
+	for name, s := range m.sessions {
+		s.mu.Lock()
+		idle := s.Status != "busy" && s.Status != "stopped" &&
+			(s.Queue == nil || len(s.Queue) == 0) &&
+			now.Sub(s.LastActiveAt) >= timeout
+		s.mu.Unlock()
+		if idle {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func (m *Manager) FormatStatus() string {

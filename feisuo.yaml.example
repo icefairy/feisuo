@@ -33,3 +33,4 @@ codebuddy:
 sessions:
   data_dir: "~/.feisuo/sessions"   # Windows 可写 "C:\\Users\\你\\.feisuo\\sessions"
   default_name: "main"
+  idle_timeout: 3600               # 会话闲置回收（秒）：超过该时长无活动则停掉其常驻 CLI 进程，下次消息自动重启；0=关闭
