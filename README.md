@@ -27,7 +27,7 @@
 - **会话介入（attach）**：`feisuo attach <会话>` 把终端挂到任意会话，实时看收发、可手动输入（tmux/多终端并行介入多会话）
 - **会话状态**：idle / busy / done / error / stopped 五态，`/STATUS` 一览
 - **闲置回收**：会话闲置超过 `sessions.idle_timeout`（默认 1 小时）自动停掉其常驻 CLI 进程释放资源，下次消息自动重启且上下文不丢
-- **WS 自愈**：应用层 WS 健康检查，连接僵死且超过阈值未恢复时自动退出进程，由 supervisor 重启重建（有任务在跑时自动避让，不误杀长任务）
+- **WS 自愈**：基于连接状态的健康检查，断连超阈值未恢复时自动退出进程，由 supervisor 重启重建；不按有无消息判活，长任务期间不会误杀
 - **跨平台**：Linux / Windows 双平台二进制（Windows 用本地 TCP 替代 Unix socket）
 - **零依赖部署**：单二进制 + yaml 配置，supervisor / NSSM 托管
 
