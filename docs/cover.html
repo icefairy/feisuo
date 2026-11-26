@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1280px; height:720px; overflow:hidden; }
+  body {
+    font-family: "Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+    background:#060a14; color:#e8f0ff; position:relative;
+  }
+  .bg { position:absolute; inset:0;
+    background:
+      radial-gradient(900px 600px at 82% 48%, rgba(34,211,238,.18), transparent 60%),
+      radial-gradient(700px 500px at 92% 78%, rgba(251,146,60,.14), transparent 65%),
+      radial-gradient(800px 700px at 8% 10%, rgba(59,130,246,.12), transparent 60%),
+      linear-gradient(160deg,#070d1a 0%,#060a14 55%,#04070f 100%);
+  }
+  .grid { position:absolute; inset:0; opacity:.35;
+    background-image:
+      linear-gradient(rgba(120,170,255,.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120,170,255,.055) 1px, transparent 1px);
+    background-size:64px 64px;
+    mask-image: radial-gradient(circle at 50% 45%, #000 30%, transparent 78%);
+  }
+  .stars i { position:absolute; width:2px; height:2px; border-radius:50%; background:#9fd8ff; opacity:.6; }
+  .frame { position:absolute; inset:22px; border:1px solid rgba(125,211,252,.14); border-radius:20px; }
+  .wrap { position:absolute; inset:0; padding:64px 72px; display:flex; }
+  .left { width:660px; display:flex; flex-direction:column; }
+  .eyebrow { display:flex; align-items:center; gap:12px; font-size:15px; letter-spacing:.22em; color:#67e8f9; font-weight:600; }
+  .eyebrow .dot { width:8px; height:8px; border-radius:50%; background:#22d3ee; box-shadow:0 0 14px #22d3ee; }
+  h1 { margin-top:26px; font-family:"Noto Serif CJK SC","Source Han Serif SC",serif; font-size:104px; line-height:1.02; letter-spacing:.04em; font-weight:700;
+       background:linear-gradient(180deg,#ffffff 0%,#d8e9ff 62%,#8fbcff 100%); -webkit-background-clip:text; color:transparent;
+       filter: drop-shadow(0 8px 30px rgba(56,189,248,.18)); }
+  .latin { margin-top:6px; font-size:20px; letter-spacing:.42em; color:#7dd3fc; font-weight:500; text-transform:uppercase; }
+  .rule { margin:26px 0 22px; width:96px; height:3px; border-radius:2px; background:linear-gradient(90deg,#22d3ee,#fbbf24); }
+  .sub { font-size:31px; line-height:1.45; font-weight:700; color:#f1f6ff; letter-spacing:.02em; }
+  .sub em { font-style:normal; color:#67e8f9; }
+  .desc { margin-top:18px; font-size:17px; line-height:1.9; color:#9db2cf; width:560px; }
+  .tags { margin-top:26px; display:flex; gap:12px; flex-wrap:wrap; }
+  .tag { padding:8px 16px; border-radius:999px; font-size:14px; color:#c7e6ff;
+    border:1px solid rgba(103,232,249,.28); background:rgba(34,211,238,.07); letter-spacing:.04em; }
+  .foot { margin-top:auto; display:flex; align-items:center; gap:14px; font-size:15px; color:#7f96b8; }
+  .foot b { color:#cfe4ff; font-weight:500; letter-spacing:.02em; }
+  .right { position:relative; flex:1; }
+  .portal { position:absolute; right:34px; top:96px; width:420px; height:420px; border-radius:50%;
+    background:radial-gradient(circle at 50% 50%, rgba(34,211,238,.30), rgba(34,211,238,.06) 42%, transparent 68%);
+    filter:blur(2px); }
+  .ring { position:absolute; border-radius:50%; border:1px solid rgba(103,232,249,.20); }
+  .r1 { right:24px; top:76px; width:440px; height:440px; }
+  .r2 { right:64px; top:116px; width:360px; height:360px; border-color:rgba(103,232,249,.14); }
+  .r3 { right:104px; top:156px; width:280px; height:280px; border-color:rgba(251,191,36,.16); }
+  .shuttle { position:absolute; right:186px; top:236px; width:114px; height:114px; filter:drop-shadow(0 0 26px rgba(34,211,238,.55)); }
+  .trail { position:absolute; right:286px; top:292px; width:190px; height:3px; border-radius:3px;
+    background:linear-gradient(90deg, rgba(34,211,238,0), rgba(34,211,238,.85)); box-shadow:0 0 18px rgba(34,211,238,.7); transform:rotate(-8deg); }
+  .bubble { position:absolute; padding:11px 16px; border-radius:14px; font-size:14px; line-height:1.4;
+    background:rgba(10,22,40,.82); border:1px solid rgba(125,211,252,.30); color:#d5e9ff;
+    box-shadow:0 10px 30px rgba(0,0,0,.35); backdrop-filter:blur(4px); white-space:nowrap; }
+  .bubble::after { content:""; position:absolute; width:6px; height:6px; border-radius:50%; background:#22d3ee; box-shadow:0 0 10px #22d3ee; }
+  .b1 { left:-24px; top:52px; } .b1::after { right:-4px; bottom:-4px; }
+  .b2 { right:-16px; top:34px; } .b2::after { left:-4px; bottom:-4px; background:#fbbf24; box-shadow:0 0 10px #fbbf24; }
+  .b3 { left:-46px; bottom:112px; } .b3::after { right:-4px; top:-4px; }
+  .b4 { right:-6px; bottom:72px; } .b4::after { left:-4px; top:-4px; background:#fbbf24; box-shadow:0 0 10px #fbbf24; }
+  .chips { position:absolute; right:6px; bottom:8px; display:flex; gap:10px; }
+  .chip { font-size:12.5px; color:#a9c7e8; padding:7px 12px; border-radius:8px;
+    border:1px dashed rgba(125,211,252,.28); background:rgba(8,18,34,.7); letter-spacing:.03em; }
+  .chip b { color:#67e8f9; font-weight:600; }
+  svg.links { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+  .halo { position:absolute; right:150px; top:196px; width:186px; height:186px; border-radius:50%;
+    background:radial-gradient(circle, rgba(255,255,255,.10), transparent 70%); }
+</style>
+</head>
+<body>
+<div class="bg"></div><div class="grid"></div>
+<div class="stars">
+  <i style="left:12%;top:18%"></i><i style="left:26%;top:72%;opacity:.35"></i><i style="left:44%;top:12%;opacity:.4"></i>
+  <i style="left:63%;top:82%;opacity:.3"></i><i style="left:88%;top:22%;opacity:.5"></i><i style="left:78%;top:64%;opacity:.3"></i>
+  <i style="left:52%;top:52%;opacity:.25"></i><i style="left:8%;top:58%;opacity:.3"></i>
+</div>
+<div class="frame"></div>
+<div class="wrap">
+  <div class="left">
+    <div class="eyebrow"><span class="dot"></span>OPEN SOURCE · FEISHU AGENT GATEWAY</div>
+    <h1>飞梭</h1>
+    <div class="latin">feisuo</div>
+    <div class="rule"></div>
+    <div class="sub">把 AI 编程 Agent<br>接进<em>飞书</em></div>
+    <div class="desc">多会话并行 · 流式回传 · 会话持久化<br>一个单二进制网关，让 Agent 在服务器上干活，<br>你在手机里发消息。</div>
+    <div class="tags">
+      <span class="tag">多会话隔离</span>
+      <span class="tag">pi / CodeBuddy 双引擎</span>
+      <span class="tag">仅需单二进制</span>
+    </div>
+    <div class="foot"><b>github.com/icefairy/feisuo</b><span>·</span><span>Go · Linux / Windows</span></div>
+  </div>
+  <div class="right">
+    <div class="portal"></div>
+    <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+    <div class="halo"></div>
+    <div class="trail"></div>
+    <svg class="shuttle" viewBox="0 0 100 100" fill="none">
+      <defs>
+        <linearGradient id="body" x1="10" y1="20" x2="80" y2="70">
+          <stop offset="0" stop-color="#e6f9ff"/><stop offset=".5" stop-color="#7dd3fc"/><stop offset="1" stop-color="#0ea5e9"/>
+        </linearGradient>
+        <linearGradient id="wing" x1="20" y1="60" x2="70" y2="90">
+          <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0369a1"/>
+        </linearGradient>
+      </defs>
+      <path d="M72 16 C64 30 55 44 44 56 L30 66 C27 68 27 72 31 73 L42 76 C44 77 45 79 45 81 L45 87 C45 91 50 93 53 90 L72 70 C84 58 90 40 86 22 C85 17 76 11 72 16 Z" fill="url(#body)"/>
+      <path d="M52 60 L63 71 L54 80 C50 84 43 83 42 78 C41 71 46 63 52 60 Z" fill="url(#wing)" opacity=".85"/>
+      <circle cx="68" cy="38" r="6.5" fill="#082f49" opacity=".85"/>
+      <circle cx="68" cy="38" r="3.2" fill="#a5f3fc"/>
+    </svg>
+    <div class="bubble b1">改一下登录页的样式</div>
+    <div class="bubble b2">跑一遍测试</div>
+    <div class="bubble b3">查昨天的错误日志</div>
+    <div class="bubble b4">这个 PR 帮我审一下</div>
+    <div class="chips">
+      <span class="chip"><b>会话 A</b> 前端</span>
+      <span class="chip"><b>会话 B</b> 运维</span>
+      <span class="chip"><b>会话 C</b> 审查</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

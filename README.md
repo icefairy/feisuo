@@ -2,6 +2,8 @@
 
 飞书机器人网关：在飞书里直接跟 AI 编程 Agent 对话。支持 **pi / CodeBuddy 双引擎**、**多会话并行**、**流式回传**、**持久会话**、**会话间协作**、**用户认证**。
 
+> 📖 项目介绍文章：[把 AI 编程 Agent 接进飞书：我造了一个多会话网关「飞梭」](https://zhuanlan.zhihu.com/p/2109240799430959667)（[Markdown 源稿](docs/zhihu-feisuo.md)）
+
 ```
 飞书消息 ──► feisuo ──► 引擎 CLI（pi / codebuddy）──► LLM
      ▲                          │
